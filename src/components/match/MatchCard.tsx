@@ -31,19 +31,13 @@ function formatKickoffTime(iso: string): string {
 
 function LiveBadge() {
   return (
-    <span
-      className="flex items-center gap-1 text-xs font-bold tracking-widest uppercase px-2 py-0.5 rounded-full"
-      style={{
-        color: '#fff',
-        background: 'rgba(220, 38, 38, 0.9)',
-        boxShadow: '0 0 12px rgba(220, 38, 38, 0.6)',
-        animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-      }}
-    >
-      <span
-        className="w-1.5 h-1.5 rounded-full bg-white"
-        style={{ animation: 'pulse 1s ease-in-out infinite' }}
-      />
+    <span className="live-badge">
+      <span className="live-dot-wrap">
+        <span className="live-dot" />
+        <span className="live-ring" />
+        <span className="live-ring live-ring-2" />
+        <span className="live-ring live-ring-3" />
+      </span>
       AO VIVO
     </span>
   );
@@ -98,25 +92,26 @@ function ScoreDisplay({
   match: MatchCardData;
 }) {
   const isScheduled = match.status === 'scheduled';
+  const isLive = match.status === 'live';
 
   if (!isScheduled) {
     return (
       <div className="flex flex-col items-center gap-1 flex-shrink-0 px-2">
         <div className="flex items-center gap-1">
           <span
-            className="font-display text-4xl leading-none"
+            className={`font-display text-4xl leading-none${isLive ? ' live-score-digit' : ''}`}
             style={{ color: 'var(--brand-yellow)' }}
           >
             {match.home_goals ?? 0}
           </span>
           <span
             className="font-display text-2xl leading-none"
-            style={{ color: 'var(--text-tertiary)' }}
+            style={{ color: isLive ? 'rgba(220,38,38,0.7)' : 'var(--text-tertiary)' }}
           >
             :
           </span>
           <span
-            className="font-display text-4xl leading-none"
+            className={`font-display text-4xl leading-none${isLive ? ' live-score-digit' : ''}`}
             style={{ color: 'var(--brand-yellow)' }}
           >
             {match.away_goals ?? 0}
@@ -172,9 +167,11 @@ export function MatchCard({
   onHomeChange: (v: string) => void;
   onAwayChange: (v: string) => void;
 }) {
+  const isLive = match.status === 'live';
+
   return (
     <div
-      className="rounded-2xl overflow-hidden"
+      className={`rounded-2xl overflow-hidden${isLive ? ' match-card-live' : ''}`}
       style={{
         background: 'var(--bg-card)',
         border: '1px solid var(--border-color)',

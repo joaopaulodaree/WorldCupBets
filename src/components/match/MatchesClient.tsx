@@ -35,6 +35,7 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
     return init;
   });
 
+  const [dirtyIds, setDirtyIds] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<{ saved: number; errors: number } | null>(null);
 
@@ -77,10 +78,12 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
       ...prev,
       [matchId]: { ...(prev[matchId] ?? { home: '', away: '' }), [side]: v },
     }));
+    setDirtyIds((prev) => new Set([...prev, matchId]));
     setResult(null);
   }
 
-  const filledEntries = Object.entries(values).filter(([, v]) => {
+  const filledEntries = Object.entries(values).filter(([matchId, v]) => {
+    if (!dirtyIds.has(matchId)) return false;
     const h = parseInt(v.home, 10);
     const a = parseInt(v.away, 10);
     return !isNaN(h) && !isNaN(a) && h >= 0 && a >= 0;
@@ -117,11 +120,9 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
 
     setSaving(false);
     setResult({ saved, errors });
-    setValues((prev) => {
-      const next = { ...prev };
-      for (const [matchId] of filledEntries) {
-        delete next[matchId];
-      }
+    setDirtyIds((prev) => {
+      const next = new Set(prev);
+      for (const [matchId] of filledEntries) next.delete(matchId);
       return next;
     });
     setTimeout(() => setResult(null), 3000);
