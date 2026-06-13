@@ -19,8 +19,16 @@ interface Props {
 export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props) {
   const [values, setValues] = useState<Record<string, PredictionEntry>>(() => {
     const init: Record<string, PredictionEntry> = {};
-    for (const [matchId, pred] of Object.entries(predictionMap)) {
-      init[matchId] = { home: String(pred.homeGoals), away: String(pred.awayGoals) };
+    const now = new Date();
+    for (const { matches } of byDate) {
+      for (const match of matches) {
+        if (match.status === 'scheduled' && now < new Date(match.kickoff_at)) {
+          const pred = predictionMap[match.id];
+          if (pred) {
+            init[match.id] = { home: String(pred.homeGoals), away: String(pred.awayGoals) };
+          }
+        }
+      }
     }
     return init;
   });
@@ -73,6 +81,13 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
 
     setSaving(false);
     setResult({ saved, errors });
+    setValues((prev) => {
+      const next = { ...prev };
+      for (const [matchId] of filledEntries) {
+        delete next[matchId];
+      }
+      return next;
+    });
     setTimeout(() => setResult(null), 3000);
   }
 
