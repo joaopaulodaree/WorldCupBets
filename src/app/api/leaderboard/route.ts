@@ -19,16 +19,17 @@ export async function GET() {
 
   const admin = createAdminClient();
 
-  const [{ data: settledPreds }, { data: liveMatches }] = await Promise.all([
-    admin.from('predictions').select('user_id, points').not('points', 'is', null),
+  const [{ data: allPreds }, { data: liveMatches }] = await Promise.all([
+    admin.from('predictions').select('user_id, points'),
     admin.from('matches').select('id, home_goals, away_goals').eq('status', 'live'),
   ]);
 
   const hasLive = (liveMatches?.length ?? 0) > 0;
 
   const totals = new Map<string, number>();
-  for (const p of settledPreds ?? []) {
-    totals.set(p.user_id, (totals.get(p.user_id) ?? 0) + (p.points ?? 0));
+  for (const p of allPreds ?? []) {
+    if (!totals.has(p.user_id)) totals.set(p.user_id, 0);
+    if (p.points != null) totals.set(p.user_id, (totals.get(p.user_id) ?? 0) + p.points);
   }
 
   if (hasLive) {

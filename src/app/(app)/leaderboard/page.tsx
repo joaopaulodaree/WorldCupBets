@@ -9,9 +9,9 @@ import { LeaderboardClient } from '@/components/leaderboard/LeaderboardClient';
 async function getLeaderboard(currentUserId: string | null): Promise<{ entries: LeaderboardEntry[]; hasLive: boolean }> {
   const admin = createAdminClient();
 
-  // 1. All scored predictions + live matches in parallel
+  // 1. All predictions (confirmed bets) + live matches in parallel
   const [{ data: predData }, { data: liveMatches }] = await Promise.all([
-    admin.from('predictions').select('user_id, points').not('points', 'is', null),
+    admin.from('predictions').select('user_id, points'),
     admin.from('matches').select('id').eq('status', 'live').limit(1),
   ]);
 
@@ -19,10 +19,11 @@ async function getLeaderboard(currentUserId: string | null): Promise<{ entries: 
 
   if (!predData?.length) return { entries: [], hasLive };
 
-  // 2. Aggregate points per user
+  // 2. Aggregate points per user — seed everyone with 0 so all bettors appear
   const totals = new Map<string, number>();
   for (const p of predData) {
-    totals.set(p.user_id, (totals.get(p.user_id) ?? 0) + (p.points ?? 0));
+    if (!totals.has(p.user_id)) totals.set(p.user_id, 0);
+    if (p.points != null) totals.set(p.user_id, (totals.get(p.user_id) ?? 0) + p.points);
   }
 
   // 3. Sort descending and assign current positions
