@@ -1,9 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { DateHeader } from './DateHeader';
 import { MatchCard, type MatchCardData } from './MatchCard';
 import type { PredictionData } from './PredictionForm';
+
+const POLL_INTERVAL = 5 * 60 * 1000;
 
 interface PredictionEntry {
   home: string;
@@ -35,6 +37,40 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
 
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<{ saved: number; errors: number } | null>(null);
+
+  type LiveScore = { home_goals: number | null; away_goals: number | null; status: MatchCardData['status'] };
+  const [liveScores, setLiveScores] = useState<Record<string, LiveScore>>({});
+
+  const hasLiveInitially = byDate.some(({ matches }) => matches.some((m) => m.status === 'live'));
+  const [hasLive, setHasLive] = useState(hasLiveInitially);
+
+  useEffect(() => {
+    if (!hasLive) return;
+
+    async function poll() {
+      try {
+        const res = await fetch('/api/live-matches');
+        if (!res.ok) return;
+        const { matches, hasLive: stillLive } = await res.json() as {
+          matches: { id: string; home_goals: number | null; away_goals: number | null; status: MatchCardData['status'] }[];
+          hasLive: boolean;
+        };
+        const overrides: Record<string, LiveScore> = {};
+        for (const m of matches) {
+          overrides[m.id] = { home_goals: m.home_goals, away_goals: m.away_goals, status: m.status };
+        }
+        setLiveScores(overrides);
+        setHasLive(stillLive);
+      } catch {
+        // silently fail — stale data is fine
+      }
+    }
+
+    poll();
+    const id = setInterval(poll, POLL_INTERVAL);
+    return () => clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasLive]);
 
   function handleChange(matchId: string, side: 'home' | 'away', v: string) {
     setValues((prev) => ({
@@ -112,7 +148,7 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
             {matches.map((match) => (
               <MatchCard
                 key={match.id}
-                match={match}
+                match={liveScores[match.id] ? { ...match, ...liveScores[match.id] } : match}
                 prediction={predictionMap[match.id]}
                 isAuthenticated={isAuthenticated}
                 homeVal={values[match.id]?.home ?? ''}

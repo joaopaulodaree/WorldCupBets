@@ -3,18 +3,21 @@
 import { cookies } from 'next/headers';
 import { verifyToken, COOKIE_NAME } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { LeaderboardRow, type LeaderboardEntry } from '@/components/leaderboard/LeaderboardRow';
+import type { LeaderboardEntry } from '@/components/leaderboard/LeaderboardRow';
+import { LeaderboardClient } from '@/components/leaderboard/LeaderboardClient';
 
-async function getLeaderboard(currentUserId: string | null): Promise<LeaderboardEntry[]> {
+async function getLeaderboard(currentUserId: string | null): Promise<{ entries: LeaderboardEntry[]; hasLive: boolean }> {
   const admin = createAdminClient();
 
-  // 1. All scored predictions
-  const { data: predData } = await admin
-    .from('predictions')
-    .select('user_id, points')
-    .not('points', 'is', null);
+  // 1. All scored predictions + live matches in parallel
+  const [{ data: predData }, { data: liveMatches }] = await Promise.all([
+    admin.from('predictions').select('user_id, points').not('points', 'is', null),
+    admin.from('matches').select('id').eq('status', 'live').limit(1),
+  ]);
 
-  if (!predData?.length) return [];
+  const hasLive = (liveMatches?.length ?? 0) > 0;
+
+  if (!predData?.length) return { entries: [], hasLive };
 
   // 2. Aggregate points per user
   const totals = new Map<string, number>();
@@ -68,7 +71,7 @@ async function getLeaderboard(currentUserId: string | null): Promise<Leaderboard
   }
 
   // 7. Build final entries
-  return sorted.map(([userId, points], i) => {
+  const entries = sorted.map(([userId, points], i) => {
     const position = i + 1;
     const prevPosition = prevPositionMap.get(userId);
     const delta = prevPosition != null ? prevPosition - position : null;
@@ -80,6 +83,8 @@ async function getLeaderboard(currentUserId: string | null): Promise<Leaderboard
       isCurrentUser: userId === currentUserId,
     };
   });
+
+  return { entries, hasLive };
 }
 
 export default async function LeaderboardPage() {
@@ -88,10 +93,11 @@ export default async function LeaderboardPage() {
   const user = token ? await verifyToken(token) : null;
 
   let entries: LeaderboardEntry[] = [];
+  let hasLive = false;
   let error: string | null = null;
 
   try {
-    entries = await getLeaderboard(user?.id ?? null);
+    ({ entries, hasLive } = await getLeaderboard(user?.id ?? null));
   } catch (e) {
     error = e instanceof Error ? e.message : 'Erro ao carregar ranking';
   }
@@ -107,23 +113,8 @@ export default async function LeaderboardPage() {
         <div className="text-center py-12">
           <p className="text-secondary">Erro ao carregar ranking: {error}</p>
         </div>
-      ) : entries.length === 0 ? (
-        <div
-          className="rounded-2xl p-10 text-center"
-          style={{ background: 'var(--bg-card)', border: '1px solid var(--border-color)' }}
-        >
-          <p className="text-2xl mb-3">⚽</p>
-          <p className="text-secondary">Nenhum palpite pontuado ainda.</p>
-          <p className="text-sm mt-1" style={{ color: 'var(--text-tertiary)' }}>
-            O ranking aparecerá após o primeiro jogo ser encerrado.
-          </p>
-        </div>
       ) : (
-        <div className="space-y-2">
-          {entries.map((entry) => (
-            <LeaderboardRow key={entry.position} entry={entry} />
-          ))}
-        </div>
+        <LeaderboardClient initialEntries={entries} initialHasLive={hasLive} />
       )}
     </div>
   );
