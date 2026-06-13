@@ -5,7 +5,8 @@ import { DateHeader } from './DateHeader';
 import { MatchCard, type MatchCardData } from './MatchCard';
 import type { PredictionData } from './PredictionForm';
 
-const POLL_INTERVAL = 5 * 60 * 1000;
+const POLL_INTERVAL_LIVE = 30_000;
+const POLL_INTERVAL_IDLE = 5 * 60 * 1000;
 
 interface PredictionEntry {
   home: string;
@@ -56,10 +57,13 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
   useEffect(() => {
     if (!shouldPoll) return;
 
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+
     async function poll() {
       try {
         const res = await fetch('/api/live-matches');
-        if (!res.ok) return;
+        if (!res.ok || cancelled) return;
         const { matches, hasLive: stillLive } = await res.json() as {
           matches: { id: string; home_goals: number | null; away_goals: number | null; status: MatchCardData['status'] }[];
           hasLive: boolean;
@@ -69,16 +73,25 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
           overrides[m.id] = { home_goals: m.home_goals, away_goals: m.away_goals, status: m.status };
         }
         setLiveScores(overrides);
-        // Keep polling while there are live games or matches that should be live by now
-        setShouldPoll(stillLive || anyMatchInProgress());
+
+        const keepPolling = stillLive || anyMatchInProgress();
+        setShouldPoll(keepPolling);
+        if (keepPolling && !cancelled) {
+          timeoutId = setTimeout(poll, stillLive ? POLL_INTERVAL_LIVE : POLL_INTERVAL_IDLE);
+        }
       } catch {
-        // silently fail — stale data is fine
+        // silently fail — retry at idle interval
+        if (!cancelled) {
+          timeoutId = setTimeout(poll, POLL_INTERVAL_IDLE);
+        }
       }
     }
 
     poll();
-    const id = setInterval(poll, POLL_INTERVAL);
-    return () => clearInterval(id);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shouldPoll]);
 
