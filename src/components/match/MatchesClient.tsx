@@ -42,11 +42,19 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
   type LiveScore = { home_goals: number | null; away_goals: number | null; status: MatchCardData['status'] };
   const [liveScores, setLiveScores] = useState<Record<string, LiveScore>>({});
 
-  const hasLiveInitially = byDate.some(({ matches }) => matches.some((m) => m.status === 'live'));
-  const [hasLive, setHasLive] = useState(hasLiveInitially);
+  function anyMatchInProgress() {
+    const now = new Date();
+    return byDate.some(({ matches }) =>
+      matches.some((m) => m.status !== 'finished' && new Date(m.kickoff_at) <= now)
+    );
+  }
+
+  const [shouldPoll, setShouldPoll] = useState(() =>
+    byDate.some(({ matches }) => matches.some((m) => m.status === 'live')) || anyMatchInProgress()
+  );
 
   useEffect(() => {
-    if (!hasLive) return;
+    if (!shouldPoll) return;
 
     async function poll() {
       try {
@@ -61,7 +69,8 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
           overrides[m.id] = { home_goals: m.home_goals, away_goals: m.away_goals, status: m.status };
         }
         setLiveScores(overrides);
-        setHasLive(stillLive);
+        // Keep polling while there are live games or matches that should be live by now
+        setShouldPoll(stillLive || anyMatchInProgress());
       } catch {
         // silently fail — stale data is fine
       }
@@ -71,7 +80,7 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
     const id = setInterval(poll, POLL_INTERVAL);
     return () => clearInterval(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasLive]);
+  }, [shouldPoll]);
 
   function handleChange(matchId: string, side: 'home' | 'away', v: string) {
     setValues((prev) => ({
