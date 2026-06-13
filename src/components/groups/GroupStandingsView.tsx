@@ -1,7 +1,7 @@
 'use client';
 
 import Image from 'next/image';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 export interface TeamStanding {
   teamId: string;
@@ -17,13 +17,26 @@ export interface TeamStanding {
   points: number;
 }
 
+export interface GroupMatchInfo {
+  id: string;
+  kickoff_at: string;
+  status: 'scheduled' | 'live' | 'finished';
+  homeTeam: { id: string; name: string; code: string; flag_url: string };
+  awayTeam: { id: string; name: string; code: string; flag_url: string };
+  homeGoals: number | null;
+  awayGoals: number | null;
+}
+
 export interface GroupData {
   name: string;
+  matches: GroupMatchInfo[];
   realStandings: TeamStanding[];
   predictedStandings: TeamStanding[];
   finishedCount: number;
   predictedCount: number;
 }
+
+type LiveOverride = { home_goals: number | null; away_goals: number | null; status: 'live' | 'finished' };
 
 function sortStandings(standings: TeamStanding[]): TeamStanding[] {
   return [...standings].sort((a, b) => {
@@ -35,7 +48,56 @@ function sortStandings(standings: TeamStanding[]): TeamStanding[] {
   });
 }
 
-function StandingsTable({ standings }: { standings: TeamStanding[] }) {
+function buildLiveStandings(
+  matches: GroupMatchInfo[],
+  overrides: Map<string, LiveOverride>,
+): TeamStanding[] {
+  const standings = new Map<string, TeamStanding>();
+
+  for (const m of matches) {
+    if (!standings.has(m.homeTeam.id)) {
+      standings.set(m.homeTeam.id, {
+        teamId: m.homeTeam.id, name: m.homeTeam.name, code: m.homeTeam.code, flag_url: m.homeTeam.flag_url,
+        played: 0, wins: 0, draws: 0, losses: 0, goalsFor: 0, goalsAgainst: 0, points: 0,
+      });
+    }
+    if (!standings.has(m.awayTeam.id)) {
+      standings.set(m.awayTeam.id, {
+        teamId: m.awayTeam.id, name: m.awayTeam.name, code: m.awayTeam.code, flag_url: m.awayTeam.flag_url,
+        played: 0, wins: 0, draws: 0, losses: 0, goalsFor: 0, goalsAgainst: 0, points: 0,
+      });
+    }
+
+    const override = overrides.get(m.id);
+    const status = override?.status ?? m.status;
+    const homeGoals = override?.home_goals ?? m.homeGoals;
+    const awayGoals = override?.away_goals ?? m.awayGoals;
+
+    if ((status === 'finished' || status === 'live') && homeGoals !== null && awayGoals !== null) {
+      const home = standings.get(m.homeTeam.id)!;
+      const away = standings.get(m.awayTeam.id)!;
+      home.played++; away.played++;
+      home.goalsFor += homeGoals; home.goalsAgainst += awayGoals;
+      away.goalsFor += awayGoals; away.goalsAgainst += homeGoals;
+      if (homeGoals > awayGoals) { home.wins++; home.points += 3; away.losses++; }
+      else if (homeGoals < awayGoals) { away.wins++; away.points += 3; home.losses++; }
+      else { home.draws++; away.draws++; home.points++; away.points++; }
+    }
+  }
+
+  return Array.from(standings.values());
+}
+
+const POLL_INTERVAL_LIVE = 30_000;
+const POLL_INTERVAL_IDLE = 5 * 60 * 1000;
+
+function StandingsTable({
+  standings,
+  liveTeamIds,
+}: {
+  standings: TeamStanding[];
+  liveTeamIds: Set<string>;
+}) {
   const sorted = sortStandings(standings);
 
   return (
@@ -58,6 +120,7 @@ function StandingsTable({ standings }: { standings: TeamStanding[] }) {
         {sorted.map((team, i) => {
           const gd = team.goalsFor - team.goalsAgainst;
           const advances = i < 2;
+          const isLive = liveTeamIds.has(team.teamId);
           return (
             <tr
               key={team.teamId}
@@ -82,6 +145,13 @@ function StandingsTable({ standings }: { standings: TeamStanding[] }) {
                     unoptimized
                   />
                   <span className="truncate font-medium">{team.name}</span>
+                  {isLive && (
+                    <span className="live-dot-wrap flex-shrink-0" style={{ width: 7, height: 7 }}>
+                      <span className="live-dot" />
+                      <span className="live-ring" />
+                      <span className="live-ring live-ring-2" />
+                    </span>
+                  )}
                 </div>
               </td>
               <td className="py-2.5 text-center text-tertiary">{team.played}</td>
@@ -93,7 +163,9 @@ function StandingsTable({ standings }: { standings: TeamStanding[] }) {
               <td className="py-2.5 text-center text-tertiary">
                 {gd > 0 ? `+${gd}` : gd}
               </td>
-              <td className="py-2.5 text-center font-bold text-brand-yellow">{team.points}</td>
+              <td className={`py-2.5 text-center font-bold${isLive ? ' live-score-digit' : ' text-brand-yellow'}`}>
+                {team.points}
+              </td>
             </tr>
           );
         })}
@@ -111,11 +183,82 @@ export function GroupStandingsView({
 }) {
   const [activeTab, setActiveTab] = useState<'real' | 'predicted'>('real');
 
+  const hasLiveInitially = groups.some((g) => g.matches.some((m) => m.status === 'live'));
+  const hasStartedMatch = groups.some((g) =>
+    g.matches.some((m) => m.status !== 'finished' && new Date(m.kickoff_at) <= new Date())
+  );
+
+  const [shouldPoll, setShouldPoll] = useState(hasLiveInitially || hasStartedMatch);
+  const [liveOverrides, setLiveOverrides] = useState<Map<string, LiveOverride>>(new Map);
+
+  useEffect(() => {
+    if (!shouldPoll) return;
+
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+
+    async function poll() {
+      try {
+        const res = await fetch('/api/live-matches');
+        if (!res.ok || cancelled) return;
+        const { matches, hasLive: stillLive } = await res.json() as {
+          matches: { id: string; home_goals: number | null; away_goals: number | null; status: 'live' | 'finished' }[];
+          hasLive: boolean;
+        };
+
+        if (!cancelled) {
+          const overrides = new Map<string, LiveOverride>();
+          for (const m of matches) {
+            overrides.set(m.id, { home_goals: m.home_goals, away_goals: m.away_goals, status: m.status });
+          }
+          setLiveOverrides(overrides);
+          setShouldPoll(stillLive);
+          if (!cancelled) {
+            timeoutId = setTimeout(poll, stillLive ? POLL_INTERVAL_LIVE : POLL_INTERVAL_IDLE);
+          }
+        }
+      } catch {
+        if (!cancelled) timeoutId = setTimeout(poll, POLL_INTERVAL_IDLE);
+      }
+    }
+
+    poll();
+    return () => { cancelled = true; clearTimeout(timeoutId); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shouldPoll]);
+
+  // Which team IDs are currently in a live match (from overrides or initial data)
+  const liveTeamIds = new Set<string>();
+  for (const g of groups) {
+    for (const m of g.matches) {
+      const override = liveOverrides.get(m.id);
+      if ((override?.status ?? m.status) === 'live') {
+        liveTeamIds.add(m.homeTeam.id);
+        liveTeamIds.add(m.awayTeam.id);
+      }
+    }
+  }
+
+  const hasAnyLive = liveTeamIds.size > 0;
+
   return (
     <div className="space-y-6">
       <div className="text-center">
         <h1 className="text-3xl font-bold text-brand-green mb-2">Tabela de Grupos</h1>
-        <p className="text-secondary">Tabela real vs seus palpites</p>
+        <p className="text-secondary">
+          {hasAnyLive ? (
+            <span className="flex items-center justify-center gap-2">
+              <span className="live-dot-wrap" style={{ width: 7, height: 7 }}>
+                <span className="live-dot" />
+                <span className="live-ring" />
+                <span className="live-ring live-ring-2" />
+              </span>
+              Atualização ao vivo · a cada 30s
+            </span>
+          ) : (
+            'Tabela real vs seus palpites'
+          )}
+        </p>
       </div>
 
       {/* Tab switcher */}
@@ -150,21 +293,49 @@ export function GroupStandingsView({
 
       <div className="grid gap-4 sm:grid-cols-2">
         {groups.map((group) => {
-          const standings =
-            activeTab === 'real' ? group.realStandings : group.predictedStandings;
+          const hasGroupLive = group.matches.some((m) => {
+            const override = liveOverrides.get(m.id);
+            return (override?.status ?? m.status) === 'live';
+          });
+
+          // When there are live overrides, recalculate standings dynamically
+          const realStandings = liveOverrides.size > 0
+            ? buildLiveStandings(group.matches, liveOverrides)
+            : group.realStandings;
+
+          const standings = activeTab === 'real' ? realStandings : group.predictedStandings;
           const count = activeTab === 'real' ? group.finishedCount : group.predictedCount;
           const empty =
             activeTab === 'real'
               ? standings.length === 0
               : standings.length === 0 && isAuthenticated;
 
+          const groupLiveTeamIds = new Set(
+            group.matches
+              .filter((m) => (liveOverrides.get(m.id)?.status ?? m.status) === 'live')
+              .flatMap((m) => [m.homeTeam.id, m.awayTeam.id])
+          );
+
           return (
             <div
               key={group.name}
-              className="bg-secondary border border-primary rounded-xl overflow-hidden"
+              className={`border rounded-xl overflow-hidden transition-all${hasGroupLive ? ' match-card-live' : ' bg-secondary border-primary'}`}
+              style={hasGroupLive ? { background: 'var(--bg-secondary)' } : undefined}
             >
               <div className="flex items-center justify-between px-4 py-3 border-b border-primary">
-                <h2 className="font-bold text-sm text-primary">Grupo {group.name}</h2>
+                <div className="flex items-center gap-2">
+                  <h2 className="font-bold text-sm text-primary">Grupo {group.name}</h2>
+                  {hasGroupLive && (
+                    <span className="live-badge" style={{ fontSize: '0.55rem', padding: '2px 7px 2px 5px', gap: 4 }}>
+                      <span className="live-dot-wrap" style={{ width: 6, height: 6 }}>
+                        <span className="live-dot" />
+                        <span className="live-ring" />
+                        <span className="live-ring live-ring-2" />
+                      </span>
+                      AO VIVO
+                    </span>
+                  )}
+                </div>
                 <span className="text-xs text-tertiary">{count}/6 jogos</span>
               </div>
 
@@ -176,7 +347,10 @@ export function GroupStandingsView({
                 </p>
               ) : (
                 <div className="px-2 pb-1">
-                  <StandingsTable standings={standings} />
+                  <StandingsTable
+                    standings={standings}
+                    liveTeamIds={activeTab === 'real' ? groupLiveTeamIds : new Set()}
+                  />
                 </div>
               )}
             </div>

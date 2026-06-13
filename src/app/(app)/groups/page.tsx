@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import {
   GroupStandingsView,
   type TeamStanding,
+  type GroupMatchInfo,
   type GroupData,
 } from '@/components/groups/GroupStandingsView';
 
@@ -157,9 +158,12 @@ export default async function GroupsPage() {
       const finishedCount = gMatches.filter((m) => m.status === 'finished').length;
       const predictedCount = gMatches.filter((m) => predictionMap.has(m.id)).length;
 
+      // Include live matches as provisional results in real standings
       const realStandings = buildStandings(gMatches, (m) => {
-        if (m.status !== 'finished' || m.home_goals === null || m.away_goals === null) return null;
-        return { homeGoals: m.home_goals, awayGoals: m.away_goals };
+        if ((m.status === 'finished' || m.status === 'live') && m.home_goals !== null && m.away_goals !== null) {
+          return { homeGoals: m.home_goals, awayGoals: m.away_goals };
+        }
+        return null;
       });
 
       // Predicted: real result if finished, otherwise prediction
@@ -172,7 +176,17 @@ export default async function GroupsPage() {
         return { homeGoals: pred.home_goals, awayGoals: pred.away_goals };
       });
 
-      return { name: g, realStandings, predictedStandings, finishedCount, predictedCount };
+      const matches: GroupMatchInfo[] = gMatches.map((m) => ({
+        id: m.id,
+        kickoff_at: m.kickoff_at,
+        status: m.status,
+        homeTeam: m.home_team,
+        awayTeam: m.away_team,
+        homeGoals: m.home_goals,
+        awayGoals: m.away_goals,
+      }));
+
+      return { name: g, matches, realStandings, predictedStandings, finishedCount, predictedCount };
     });
 
   return (
