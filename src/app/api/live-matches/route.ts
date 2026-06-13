@@ -5,28 +5,31 @@ import { getFinishedAndLiveGames } from '@/lib/worldcup26/client';
 export const dynamic = 'force-dynamic';
 
 // Module-level throttle: shared across warm serverless instances.
-// Prevents hammering worldcup26.ir when multiple clients poll simultaneously.
 let lastSyncAt = 0;
 const SYNC_THROTTLE_MS = 25_000;
 
-async function syncLiveScores() {
-  lastSyncAt = Date.now(); // set early to prevent concurrent syncs
+async function syncStartedMatches() {
+  lastSyncAt = Date.now(); // set early to block concurrent syncs
   const admin = createAdminClient();
 
-  const { data: liveInDb } = await admin
+  // All non-finished matches that have already kicked off
+  const { data: candidates } = await admin
     .from('matches')
-    .select('id, external_id')
-    .eq('status', 'live');
+    .select('id, external_id, status')
+    .neq('status', 'finished')
+    .not('external_id', 'is', null)
+    .lte('kickoff_at', new Date().toISOString());
 
-  if (!liveInDb?.length) return;
+  if (!candidates?.length) return;
 
   const results = await getFinishedAndLiveGames();
   const resultMap = new Map(results.map((r) => [r.externalId, r]));
 
   await Promise.all(
-    liveInDb.map((match) => {
+    candidates.map((match) => {
       const result = resultMap.get(match.external_id);
       if (!result) return Promise.resolve();
+      if (result.status === match.status && result.status !== 'live') return Promise.resolve();
       return admin
         .from('matches')
         .update({ status: result.status, home_goals: result.homeGoals, away_goals: result.awayGoals })
@@ -38,17 +41,18 @@ async function syncLiveScores() {
 export async function GET() {
   const admin = createAdminClient();
 
-  const { data } = await admin
+  // Check for live matches OR scheduled matches past kickoff
+  const { data: started } = await admin
     .from('matches')
     .select('id, home_goals, away_goals, status')
-    .eq('status', 'live');
+    .neq('status', 'finished')
+    .lte('kickoff_at', new Date().toISOString());
 
-  const hasLive = (data?.length ?? 0) > 0;
+  const hasStarted = (started?.length ?? 0) > 0;
 
-  if (hasLive && Date.now() - lastSyncAt > SYNC_THROTTLE_MS) {
-    await syncLiveScores();
+  if (hasStarted && Date.now() - lastSyncAt > SYNC_THROTTLE_MS) {
+    await syncStartedMatches();
 
-    // Re-query after sync to return fresh scores
     const { data: fresh } = await admin
       .from('matches')
       .select('id, home_goals, away_goals, status')
@@ -57,5 +61,6 @@ export async function GET() {
     return NextResponse.json({ matches: fresh ?? [], hasLive: (fresh?.length ?? 0) > 0 });
   }
 
-  return NextResponse.json({ matches: data ?? [], hasLive });
+  const live = (started ?? []).filter((m) => m.status === 'live');
+  return NextResponse.json({ matches: live, hasLive: live.length > 0 });
 }
