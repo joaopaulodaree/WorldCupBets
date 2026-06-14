@@ -91,12 +91,30 @@ function buildLiveStandings(
 const POLL_INTERVAL_LIVE = 30_000;
 const POLL_INTERVAL_IDLE = 5 * 60 * 1000;
 
+function getQualifyingThirdIds(allGroupStandings: TeamStanding[][]): Set<string> {
+  const thirds: TeamStanding[] = [];
+  for (const standings of allGroupStandings) {
+    const sorted = sortStandings(standings);
+    if (sorted.length >= 3) thirds.push(sorted[2]);
+  }
+  const sortedThirds = [...thirds].sort((a, b) => {
+    if (b.points !== a.points) return b.points - a.points;
+    const gdA = a.goalsFor - a.goalsAgainst;
+    const gdB = b.goalsFor - b.goalsAgainst;
+    if (gdB !== gdA) return gdB - gdA;
+    return b.goalsFor - a.goalsFor;
+  });
+  return new Set(sortedThirds.slice(0, 8).map((t) => t.teamId));
+}
+
 function StandingsTable({
   standings,
   liveTeamIds,
+  qualifyingThirdIds,
 }: {
   standings: TeamStanding[];
   liveTeamIds: Set<string>;
+  qualifyingThirdIds: Set<string>;
 }) {
   const sorted = sortStandings(standings);
 
@@ -120,17 +138,21 @@ function StandingsTable({
         {sorted.map((team, i) => {
           const gd = team.goalsFor - team.goalsAgainst;
           const advances = i < 2;
+          const qualifyingThird = i === 2 && qualifyingThirdIds.has(team.teamId);
           const isLive = liveTeamIds.has(team.teamId);
           return (
             <tr
               key={team.teamId}
               className={`border-b border-primary/30 last:border-0 transition-colors hover:bg-primary/30 ${
-                advances ? 'text-primary' : 'text-secondary'
+                advances || qualifyingThird ? 'text-primary' : 'text-tertiary'
               }`}
             >
               <td className="py-2.5 relative pl-2">
                 {advances && (
                   <span className="absolute left-0 top-0 bottom-0 w-0.5 bg-brand-green rounded-full" />
+                )}
+                {qualifyingThird && (
+                  <span className="absolute left-0 top-0 bottom-0 w-0.5 bg-brand-yellow rounded-full" />
                 )}
                 <span className="text-tertiary">{i + 1}</span>
               </td>
@@ -241,6 +263,15 @@ export function GroupStandingsView({
 
   const hasAnyLive = liveTeamIds.size > 0;
 
+  // Cross-group: which 8 third-place teams are currently qualifying
+  const allRealStandings = groups.map((g) =>
+    liveOverrides.size > 0 ? buildLiveStandings(g.matches, liveOverrides) : g.realStandings,
+  );
+  const allPredictedStandings = groups.map((g) => g.predictedStandings);
+  const realQualifyingThirds = getQualifyingThirdIds(allRealStandings);
+  const predictedQualifyingThirds = getQualifyingThirdIds(allPredictedStandings);
+  const qualifyingThirds = activeTab === 'real' ? realQualifyingThirds : predictedQualifyingThirds;
+
   return (
     <div className="space-y-6">
       <div className="text-center">
@@ -350,6 +381,7 @@ export function GroupStandingsView({
                   <StandingsTable
                     standings={standings}
                     liveTeamIds={activeTab === 'real' ? groupLiveTeamIds : new Set()}
+                    qualifyingThirdIds={qualifyingThirds}
                   />
                 </div>
               )}
@@ -358,9 +390,26 @@ export function GroupStandingsView({
         })}
       </div>
 
-      <p className="text-xs text-tertiary text-center pb-4">
-        Top 2 de cada grupo avançam para as oitavas de final
-      </p>
+      <div className="pb-4 space-y-2">
+        <p className="text-xs text-tertiary text-center font-medium">Legenda de classificação</p>
+        <div className="flex flex-col gap-1.5 max-w-sm mx-auto">
+          <div className="flex items-center gap-2 text-xs text-secondary">
+            <span className="w-2 h-4 bg-brand-green rounded-full flex-shrink-0" />
+            <span>1º e 2º lugar — classificados para as oitavas</span>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-secondary">
+            <span className="w-2 h-4 bg-brand-yellow rounded-full flex-shrink-0" />
+            <span>3º lugar — entre os 8 melhores terceiros (classificando)</span>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-tertiary">
+            <span className="w-2 h-4 bg-white/10 rounded-full flex-shrink-0" />
+            <span>3º/4º lugar fora — eliminado</span>
+          </div>
+        </div>
+        <p className="text-xs text-tertiary text-center pt-1">
+          Comparação por pts → saldo → gols. Em caso de empate: fair play e ranking FIFA (não calculados aqui)
+        </p>
+      </div>
     </div>
   );
 }

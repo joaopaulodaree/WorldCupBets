@@ -104,6 +104,34 @@ export async function GET(request: Request) {
       synced++;
     }
 
+    // Backfill: score any predictions that are still null-points for already-finished matches.
+    // This handles cases where the sync cycle that marked a match finished failed to score predictions.
+    const { data: unscoredPreds } = await supabase
+      .from('predictions')
+      .select('id, match_id, home_goals, away_goals')
+      .is('points', null);
+
+    if (unscoredPreds?.length) {
+      const finishedMatchIds = [...new Set(unscoredPreds.map((p) => p.match_id))];
+      const { data: finishedMatches } = await supabase
+        .from('matches')
+        .select('id, status, home_goals, away_goals')
+        .in('id', finishedMatchIds)
+        .eq('status', 'finished')
+        .not('home_goals', 'is', null)
+        .not('away_goals', 'is', null);
+
+      if (finishedMatches?.length) {
+        const matchResultMap = new Map(finishedMatches.map((m) => [m.id, m]));
+        for (const p of unscoredPreds) {
+          const match = matchResultMap.get(p.match_id);
+          if (!match) continue;
+          const pts = calcPoints(p.home_goals, p.away_goals, match.home_goals!, match.away_goals!);
+          await supabase.from('predictions').update({ points: pts }).eq('id', p.id);
+        }
+      }
+    }
+
     return NextResponse.json({ synced });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';

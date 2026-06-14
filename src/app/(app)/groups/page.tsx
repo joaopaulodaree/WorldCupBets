@@ -166,14 +166,14 @@ export default async function GroupsPage() {
         return null;
       });
 
-      // Predicted: real result if finished, otherwise prediction
+      // Predicted: user's bet takes priority; real result only if no bet was placed
       const predictedStandings = buildStandings(gMatches, (m) => {
-        if (m.status === 'finished' && m.home_goals !== null && m.away_goals !== null) {
+        const pred = predictionMap.get(m.id);
+        if (pred) return { homeGoals: pred.home_goals, awayGoals: pred.away_goals };
+        if ((m.status === 'finished' || m.status === 'live') && m.home_goals !== null && m.away_goals !== null) {
           return { homeGoals: m.home_goals, awayGoals: m.away_goals };
         }
-        const pred = predictionMap.get(m.id);
-        if (!pred) return null;
-        return { homeGoals: pred.home_goals, awayGoals: pred.away_goals };
+        return null;
       });
 
       const matches: GroupMatchInfo[] = gMatches.map((m) => ({
