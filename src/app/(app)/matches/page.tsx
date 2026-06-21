@@ -98,11 +98,14 @@ export default async function MatchesPage() {
     );
   }
 
+  const todayKey = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+
   return (
     <MatchesClient
       byDate={byDate}
       predictionMap={predictionMap}
       isAuthenticated={isAuthenticated}
+      todayKey={todayKey}
     />
   );
 }

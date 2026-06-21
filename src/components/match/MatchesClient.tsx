@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { DateHeader } from './DateHeader';
 import { MatchCard, type MatchCardData } from './MatchCard';
 import type { PredictionData } from './PredictionForm';
@@ -17,9 +17,15 @@ interface Props {
   byDate: { dateKey: string; matches: MatchCardData[] }[];
   predictionMap: Record<string, PredictionData>;
   isAuthenticated: boolean;
+  todayKey: string;
 }
 
-export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props) {
+export function MatchesClient({ byDate, predictionMap, isAuthenticated, todayKey }: Props) {
+  const dateKeys = byDate.map((d) => d.dateKey);
+  const lastDateKey = dateKeys[dateKeys.length - 1] ?? '';
+  // When today is past the tournament, show all sections open
+  const tournamentOver = todayKey > lastDateKey;
+
   const [values, setValues] = useState<Record<string, PredictionEntry>>(() => {
     const init: Record<string, PredictionEntry> = {};
     const now = new Date();
@@ -35,6 +41,23 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
     }
     return init;
   });
+
+  // Past days collapsed by default (unless tournament is over)
+  const [collapsedDates, setCollapsedDates] = useState<Set<string>>(() => {
+    if (tournamentOver) return new Set();
+    return new Set(dateKeys.filter((k) => k < todayKey));
+  });
+
+  // Refs for each date section (for scroll-to-today)
+  const sectionRefs = useRef<Map<string, HTMLElement>>(new Map());
+  const setSectionRef = useCallback((dateKey: string, el: HTMLElement | null) => {
+    if (el) sectionRefs.current.set(dateKey, el);
+    else sectionRefs.current.delete(dateKey);
+  }, []);
+
+  // FAB visibility via IntersectionObserver
+  const [showFab, setShowFab] = useState(false);
+  const todaySectionRef = useRef<HTMLElement | null>(null);
 
   const [dirtyIds, setDirtyIds] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
@@ -53,6 +76,49 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
   const [shouldPoll, setShouldPoll] = useState(() =>
     byDate.some(({ matches }) => matches.some((m) => m.status === 'live')) || anyMatchInProgress()
   );
+
+  // Scroll to today's section on mount
+  useEffect(() => {
+    // Find today's section, or the next future day if today has no matches
+    const targetKey = dateKeys.find((k) => k >= todayKey);
+    if (!targetKey) return;
+    const el = sectionRefs.current.get(targetKey);
+    if (!el) return;
+    // Small delay so the page has fully painted before scrolling
+    const id = setTimeout(() => {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 100);
+    return () => clearTimeout(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // IntersectionObserver for FAB — show when today's section is <10% visible
+  useEffect(() => {
+    const el = todaySectionRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => setShowFab(!entry.isIntersecting),
+      { threshold: 0.1 }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  function scrollToToday() {
+    const targetKey = dateKeys.find((k) => k >= todayKey);
+    if (!targetKey) return;
+    const el = sectionRefs.current.get(targetKey);
+    el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function toggleCollapse(dateKey: string) {
+    setCollapsedDates((prev) => {
+      const next = new Set(prev);
+      if (next.has(dateKey)) next.delete(dateKey);
+      else next.add(dateKey);
+      return next;
+    });
+  }
 
   useEffect(() => {
     if (!shouldPoll) return;
@@ -164,25 +230,59 @@ export function MatchesClient({ byDate, predictionMap, isAuthenticated }: Props)
         </p>
       </div>
 
-      {byDate.map(({ dateKey, matches }) => (
-        <section key={dateKey}>
-          <DateHeader dateKey={dateKey} />
-          <div className="grid gap-3 sm:grid-cols-2">
-            {matches.map((match) => (
-              <MatchCard
-                key={match.id}
-                match={liveScores[match.id] ? { ...match, ...liveScores[match.id] } : match}
-                prediction={predictionMap[match.id]}
-                isAuthenticated={isAuthenticated}
-                homeVal={values[match.id]?.home ?? ''}
-                awayVal={values[match.id]?.away ?? ''}
-                onHomeChange={(v) => handleChange(match.id, 'home', v)}
-                onAwayChange={(v) => handleChange(match.id, 'away', v)}
-              />
-            ))}
-          </div>
-        </section>
-      ))}
+      {byDate.map(({ dateKey, matches }) => {
+        const isToday = dateKey === todayKey;
+        const isPast = !tournamentOver && dateKey < todayKey;
+        const collapsed = collapsedDates.has(dateKey);
+
+        return (
+          <section
+            key={dateKey}
+            id={`date-${dateKey}`}
+            ref={(el) => {
+              setSectionRef(dateKey, el);
+              if (isToday) todaySectionRef.current = el;
+            }}
+          >
+            <DateHeader
+              dateKey={dateKey}
+              isToday={isToday}
+              isPast={isPast}
+              collapsed={collapsed}
+              matchCount={matches.length}
+              onToggle={isPast ? () => toggleCollapse(dateKey) : undefined}
+            />
+            {!collapsed && (
+              <div className="grid gap-3 sm:grid-cols-2">
+                {matches.map((match) => (
+                  <MatchCard
+                    key={match.id}
+                    match={liveScores[match.id] ? { ...match, ...liveScores[match.id] } : match}
+                    prediction={predictionMap[match.id]}
+                    isAuthenticated={isAuthenticated}
+                    homeVal={values[match.id]?.home ?? ''}
+                    awayVal={values[match.id]?.away ?? ''}
+                    onHomeChange={(v) => handleChange(match.id, 'home', v)}
+                    onAwayChange={(v) => handleChange(match.id, 'away', v)}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        );
+      })}
+
+      {showFab && (
+        <button
+          onClick={scrollToToday}
+          className="fixed bottom-36 md:bottom-24 right-4 z-50 flex items-center gap-1.5 px-4 py-2.5 rounded-full font-bold text-sm shadow-lg transition-opacity"
+          style={{ background: 'var(--brand-green)', color: '#000' }}
+          aria-label="Ir para hoje"
+        >
+          <span>↓</span>
+          <span>Hoje</span>
+        </button>
+      )}
 
       {isAuthenticated && (
         <div
