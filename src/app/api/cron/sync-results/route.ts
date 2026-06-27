@@ -34,106 +34,106 @@ export async function GET(request: Request) {
       .neq('status', 'finished')
       .not('external_id', 'is', null);
 
-    if (!relevantMatches?.length) {
-      return NextResponse.json({ synced: 0, message: 'No matches to sync' });
-    }
-
-    // Fetch live/recent results from worldcup26.ir
-    const results = await getFinishedAndLiveGames();
-    const resultMap = new Map(results.map((r) => [r.externalId, r]));
-
-    function calcPoints(predHome: number, predAway: number, realHome: number, realAway: number): number {
-      if (predHome === realHome && predAway === realAway) return 3;
-      return Math.sign(predHome - predAway) === Math.sign(realHome - realAway) ? 1 : 0;
-    }
-
     let synced = 0;
-    for (const match of relevantMatches) {
-      const result = resultMap.get(match.external_id);
-      if (!result) continue;
-      if (result.status === match.status && result.status === 'scheduled') continue;
 
-      await supabase
-        .from('matches')
-        .update({
-          status: result.status,
-          home_goals: result.homeGoals,
-          away_goals: result.awayGoals,
-        })
-        .eq('id', match.id);
+    if (relevantMatches?.length) {
+      // Fetch live/recent results from worldcup26.ir
+      const results = await getFinishedAndLiveGames();
+      const resultMap = new Map(results.map((r) => [r.externalId, r]));
 
-      // Calculate prediction points for newly finished matches
-      if (result.status === 'finished' && result.homeGoals !== null && result.awayGoals !== null) {
-        const { data: preds } = await supabase
-          .from('predictions')
-          .select('id, home_goals, away_goals')
-          .eq('match_id', match.id)
-          .is('points', null);
-
-        for (const p of preds ?? []) {
-          const pts = calcPoints(p.home_goals, p.away_goals, result.homeGoals!, result.awayGoals!);
-          await supabase.from('predictions').update({ points: pts }).eq('id', p.id);
-        }
-
-        // Snapshot the full leaderboard after this match's points are settled
-        const { data: allScored } = await supabase
-          .from('predictions')
-          .select('user_id, points')
-          .not('points', 'is', null);
-
-        const totals = new Map<string, number>();
-        for (const p of allScored ?? []) {
-          totals.set(p.user_id, (totals.get(p.user_id) ?? 0) + (p.points ?? 0));
-        }
-
-        const ranked = [...totals.entries()].sort((a, b) => b[1] - a[1]);
-        const snapshots = ranked.map(([userId, pts], i) => ({
-          match_id: match.id,
-          user_id: userId,
-          position: i + 1,
-          points: pts,
-        }));
-
-        if (snapshots.length > 0) {
-          await supabase
-            .from('leaderboard_snapshots')
-            .upsert(snapshots, { onConflict: 'match_id,user_id' });
-        }
+      function calcPoints(predHome: number, predAway: number, realHome: number, realAway: number): number {
+        if (predHome === realHome && predAway === realAway) return 3;
+        return Math.sign(predHome - predAway) === Math.sign(realHome - realAway) ? 1 : 0;
       }
 
-      synced++;
-    }
+      for (const match of relevantMatches) {
+        const result = resultMap.get(match.external_id);
+        if (!result) continue;
+        if (result.status === match.status && result.status === 'scheduled') continue;
 
-    // Backfill: score any predictions that are still null-points for already-finished matches.
-    // This handles cases where the sync cycle that marked a match finished failed to score predictions.
-    const { data: unscoredPreds } = await supabase
-      .from('predictions')
-      .select('id, match_id, home_goals, away_goals')
-      .is('points', null);
+        await supabase
+          .from('matches')
+          .update({
+            status: result.status,
+            home_goals: result.homeGoals,
+            away_goals: result.awayGoals,
+          })
+          .eq('id', match.id);
 
-    if (unscoredPreds?.length) {
-      const finishedMatchIds = [...new Set(unscoredPreds.map((p) => p.match_id))];
-      const { data: finishedMatches } = await supabase
-        .from('matches')
-        .select('id, status, home_goals, away_goals')
-        .in('id', finishedMatchIds)
-        .eq('status', 'finished')
-        .not('home_goals', 'is', null)
-        .not('away_goals', 'is', null);
+        // Calculate prediction points for newly finished matches
+        if (result.status === 'finished' && result.homeGoals !== null && result.awayGoals !== null) {
+          const { data: preds } = await supabase
+            .from('predictions')
+            .select('id, home_goals, away_goals')
+            .eq('match_id', match.id)
+            .is('points', null);
 
-      if (finishedMatches?.length) {
-        const matchResultMap = new Map(finishedMatches.map((m) => [m.id, m]));
-        for (const p of unscoredPreds) {
-          const match = matchResultMap.get(p.match_id);
-          if (!match) continue;
-          const pts = calcPoints(p.home_goals, p.away_goals, match.home_goals!, match.away_goals!);
-          await supabase.from('predictions').update({ points: pts }).eq('id', p.id);
+          for (const p of preds ?? []) {
+            const pts = calcPoints(p.home_goals, p.away_goals, result.homeGoals!, result.awayGoals!);
+            await supabase.from('predictions').update({ points: pts }).eq('id', p.id);
+          }
+
+          // Snapshot the full leaderboard after this match's points are settled
+          const { data: allScored } = await supabase
+            .from('predictions')
+            .select('user_id, points')
+            .not('points', 'is', null);
+
+          const totals = new Map<string, number>();
+          for (const p of allScored ?? []) {
+            totals.set(p.user_id, (totals.get(p.user_id) ?? 0) + (p.points ?? 0));
+          }
+
+          const ranked = [...totals.entries()].sort((a, b) => b[1] - a[1]);
+          const snapshots = ranked.map(([userId, pts], i) => ({
+            match_id: match.id,
+            user_id: userId,
+            position: i + 1,
+            points: pts,
+          }));
+
+          if (snapshots.length > 0) {
+            await supabase
+              .from('leaderboard_snapshots')
+              .upsert(snapshots, { onConflict: 'match_id,user_id' });
+          }
+        }
+
+        synced++;
+      }
+
+      // Backfill: score any predictions that are still null-points for already-finished matches.
+      // This handles cases where the sync cycle that marked a match finished failed to score predictions.
+      const { data: unscoredPreds } = await supabase
+        .from('predictions')
+        .select('id, match_id, home_goals, away_goals')
+        .is('points', null);
+
+      if (unscoredPreds?.length) {
+        const finishedMatchIds = [...new Set(unscoredPreds.map((p) => p.match_id))];
+        const { data: finishedMatches } = await supabase
+          .from('matches')
+          .select('id, status, home_goals, away_goals')
+          .in('id', finishedMatchIds)
+          .eq('status', 'finished')
+          .not('home_goals', 'is', null)
+          .not('away_goals', 'is', null);
+
+        if (finishedMatches?.length) {
+          const matchResultMap = new Map(finishedMatches.map((m) => [m.id, m]));
+          for (const p of unscoredPreds) {
+            const match = matchResultMap.get(p.match_id);
+            if (!match) continue;
+            const pts = calcPoints(p.home_goals, p.away_goals, match.home_goals!, match.away_goals!);
+            await supabase.from('predictions').update({ points: pts }).eq('id', p.id);
+          }
         }
       }
     }
 
     // ── Knockout matches sync ────────────────────────────────────────────────
     // Upsert knockout_matches from worldcup26 API.
+    // Always runs — needed even after all group-stage matches are finished.
     // Team name → UUID lookup uses the teams table (name field in English).
     await syncKnockoutMatches(supabase);
 
@@ -174,9 +174,9 @@ async function syncKnockoutMatches(supabase: ReturnType<typeof getAdminClient>) 
     (allTeams ?? []).map((t: { id: string; name: string }) => [t.name.toLowerCase(), t.id])
   );
 
-  for (const game of knockoutGames) {
+  const rows = knockoutGames.map((game) => {
     const mapping = ROUND_MAP[game.type];
-    if (!mapping) continue;
+    if (!mapping) return null;
 
     const slot = game.externalId - mapping.base;
     const homeTeamId = game.homeTeamNameEn
@@ -194,18 +194,22 @@ async function syncKnockoutMatches(supabase: ReturnType<typeof getAdminClient>) 
       // Equal goals at FT = ongoing ET/penalties — winnerTeamId stays null until API shows final result
     }
 
-    await supabase.from('knockout_matches').upsert(
-      {
-        external_id: game.externalId,
-        round: mapping.round,
-        slot,
-        home_team_id: homeTeamId,
-        away_team_id: awayTeamId,
-        winner_team_id: winnerTeamId,
-        kickoff_at: parseKickoffAt(game.localDate),
-        status: game.status === 'scheduled' && (!homeTeamId || !awayTeamId) ? 'tbd' : game.status,
-      },
-      { onConflict: 'external_id', ignoreDuplicates: false }
-    );
+    return {
+      external_id: game.externalId,
+      round: mapping.round,
+      slot,
+      home_team_id: homeTeamId,
+      away_team_id: awayTeamId,
+      winner_team_id: winnerTeamId,
+      kickoff_at: parseKickoffAt(game.localDate),
+      status: game.status === 'scheduled' && (!homeTeamId || !awayTeamId) ? 'tbd' : game.status,
+    };
+  });
+
+  const validRows = rows.filter((r) => r !== null);
+  if (validRows.length > 0) {
+    await supabase
+      .from('knockout_matches')
+      .upsert(validRows, { onConflict: 'external_id', ignoreDuplicates: false });
   }
 }
