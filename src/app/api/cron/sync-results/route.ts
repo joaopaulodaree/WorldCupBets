@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { getFinishedAndLiveGames } from '@/lib/worldcup26/client';
+import { getFinishedAndLiveGames, getAllKnockoutGames } from '@/lib/worldcup26/client';
 
 // Uses service role to bypass RLS on writes
 function getAdminClient() {
@@ -132,9 +132,80 @@ export async function GET(request: Request) {
       }
     }
 
+    // ── Knockout matches sync ────────────────────────────────────────────────
+    // Upsert knockout_matches from worldcup26 API.
+    // Team name → UUID lookup uses the teams table (name field in English).
+    await syncKnockoutMatches(supabase);
+
     return NextResponse.json({ synced });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+// ── Knockout sync helpers ──────────────────────────────────────────────────
+
+const ROUND_MAP: Record<string, { round: number; base: number }> = {
+  r32: { round: 5, base: 73 },
+  r16: { round: 6, base: 89 },
+  qf:  { round: 7, base: 97 },
+  sf:  { round: 8, base: 101 },
+  final: { round: 9, base: 104 },
+};
+
+function parseKickoffAt(localDate: string | null): string | null {
+  if (!localDate) return null;
+  // Format: "MM/DD/YYYY HH:MM" — treat as EDT (UTC-4, used for most Copa 2026 venues)
+  const [datePart, timePart] = localDate.split(' ');
+  if (!datePart || !timePart) return null;
+  const [month, day, year] = datePart.split('/');
+  const isoString = `${year}-${month.padStart(2,'0')}-${day.padStart(2,'0')}T${timePart}:00-04:00`;
+  return new Date(isoString).toISOString();
+}
+
+async function syncKnockoutMatches(supabase: ReturnType<typeof getAdminClient>) {
+  const knockoutGames = await getAllKnockoutGames();
+  if (!knockoutGames.length) return;
+
+  // Build team name → UUID map
+  const { data: allTeams } = await supabase.from('teams').select('id, name');
+  const teamByName = new Map<string, string>(
+    (allTeams ?? []).map((t: { id: string; name: string }) => [t.name.toLowerCase(), t.id])
+  );
+
+  for (const game of knockoutGames) {
+    const mapping = ROUND_MAP[game.type];
+    if (!mapping) continue;
+
+    const slot = game.externalId - mapping.base;
+    const homeTeamId = game.homeTeamNameEn
+      ? (teamByName.get(game.homeTeamNameEn.toLowerCase()) ?? null)
+      : null;
+    const awayTeamId = game.awayTeamNameEn
+      ? (teamByName.get(game.awayTeamNameEn.toLowerCase()) ?? null)
+      : null;
+
+    // Determine winner for finished games (only when goals differ — ties go to ET/penalties)
+    let winnerTeamId: string | null = null;
+    if (game.status === 'finished' && game.homeGoals !== null && game.awayGoals !== null) {
+      if (game.homeGoals > game.awayGoals) winnerTeamId = homeTeamId;
+      else if (game.awayGoals > game.homeGoals) winnerTeamId = awayTeamId;
+      // Equal goals at FT = ongoing ET/penalties — winnerTeamId stays null until API shows final result
+    }
+
+    await supabase.from('knockout_matches').upsert(
+      {
+        external_id: game.externalId,
+        round: mapping.round,
+        slot,
+        home_team_id: homeTeamId,
+        away_team_id: awayTeamId,
+        winner_team_id: winnerTeamId,
+        kickoff_at: parseKickoffAt(game.localDate),
+        status: game.status === 'scheduled' && (!homeTeamId || !awayTeamId) ? 'tbd' : game.status,
+      },
+      { onConflict: 'external_id', ignoreDuplicates: false }
+    );
   }
 }
