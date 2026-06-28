@@ -76,7 +76,7 @@ export function KnockoutClient({ matches, existingPicks, bracketState, userId }:
   const roundPickCount = (round: number) =>
     Object.keys(picks).filter(k => k.startsWith(`${round}-`)).length;
 
-  const allPicksDone = totalPicks >= 31;
+  const allPicksDone = totalPicks === 31;
 
   async function handleSubmit() {
     if (!allPicksDone || submitting) return;
