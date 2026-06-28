@@ -146,6 +146,24 @@ export async function GET(request: Request) {
 
 // ── Knockout sync helpers ──────────────────────────────────────────────────
 
+// worldcup26 API returns English team names; our DB stores Portuguese names.
+// Map English name (lowercase) → FIFA 3-letter code to bridge the gap.
+const EN_TO_CODE: Record<string, string> = {
+  'algeria': 'ALG', 'argentina': 'ARG', 'australia': 'AUS', 'austria': 'AUT',
+  'belgium': 'BEL', 'bosnia and herzegovina': 'BIH', 'brazil': 'BRA',
+  'canada': 'CAN', 'cape verde': 'CPV', 'colombia': 'COL', 'croatia': 'CRO',
+  'democratic republic of the congo': 'COD', 'ecuador': 'ECU', 'egypt': 'EGY',
+  'england': 'ENG', 'france': 'FRA', 'germany': 'GER', 'ghana': 'GHA',
+  'ivory coast': 'CIV', 'japan': 'JPN', 'mexico': 'MEX', 'morocco': 'MAR',
+  'netherlands': 'NED', 'norway': 'NOR', 'paraguay': 'PAR', 'portugal': 'POR',
+  'senegal': 'SEN', 'south africa': 'RSA', 'spain': 'ESP', 'sweden': 'SWE',
+  'switzerland': 'SUI', 'united states': 'USA', 'new zealand': 'NZL',
+  'south korea': 'KOR', 'iran': 'IRN', 'iraq': 'IRQ', 'jordan': 'JOR',
+  'uzbekistan': 'UZB', 'saudi arabia': 'KSA', 'qatar': 'QAT', 'tunisia': 'TUN',
+  'turkey': 'TUR', 'uruguay': 'URU', 'panama': 'PAN', 'curacao': 'CUW',
+  'curaçao': 'CUW', 'scotland': 'SCO', 'czech republic': 'CZE', 'haiti': 'HAI',
+};
+
 const ROUND_MAP: Record<string, { round: number; base: number }> = {
   r32: { round: 5, base: 73 },
   r16: { round: 6, base: 89 },
@@ -168,10 +186,10 @@ async function syncKnockoutMatches(supabase: ReturnType<typeof getAdminClient>) 
   const knockoutGames = await getAllKnockoutGames();
   if (!knockoutGames.length) return;
 
-  // Build team name → UUID map
-  const { data: allTeams } = await supabase.from('teams').select('id, name');
-  const teamByName = new Map<string, string>(
-    (allTeams ?? []).map((t: { id: string; name: string }) => [t.name.toLowerCase(), t.id])
+  // Build team code → UUID map (API returns English names; DB stores Portuguese)
+  const { data: allTeams } = await supabase.from('teams').select('id, code');
+  const teamByCode = new Map<string, string>(
+    (allTeams ?? []).map((t: { id: string; code: string }) => [t.code, t.id])
   );
 
   const rows = knockoutGames.map((game) => {
@@ -180,10 +198,10 @@ async function syncKnockoutMatches(supabase: ReturnType<typeof getAdminClient>) 
 
     const slot = game.externalId - mapping.base;
     const homeTeamId = game.homeTeamNameEn
-      ? (teamByName.get(game.homeTeamNameEn.toLowerCase()) ?? null)
+      ? (teamByCode.get(EN_TO_CODE[game.homeTeamNameEn.toLowerCase()] ?? '') ?? null)
       : null;
     const awayTeamId = game.awayTeamNameEn
-      ? (teamByName.get(game.awayTeamNameEn.toLowerCase()) ?? null)
+      ? (teamByCode.get(EN_TO_CODE[game.awayTeamNameEn.toLowerCase()] ?? '') ?? null)
       : null;
 
     // Determine winner for finished games (only when goals differ — ties go to ET/penalties)
