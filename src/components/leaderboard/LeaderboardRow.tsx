@@ -2,6 +2,9 @@ export type LeaderboardEntry = {
   position: number;
   name: string;
   points: number;
+  jogos_pts: number;
+  grupo_pts: number;
+  bracket_pts: number;
   delta: number | null;
   isCurrentUser: boolean;
 };
@@ -48,6 +51,18 @@ function DeltaBadge({ delta }: { delta: number | null }) {
   );
 }
 
+function PtsPill({ label, value }: { label: string; value: number }) {
+  if (value === 0) return null;
+  return (
+    <span
+      className="text-xs px-1.5 py-0.5 rounded-md tabular-nums"
+      style={{ background: 'var(--bg-secondary)', color: 'var(--text-tertiary)' }}
+    >
+      {label} {value}
+    </span>
+  );
+}
+
 export function LeaderboardRow({ entry }: { entry: LeaderboardEntry }) {
   return (
     <div
@@ -64,14 +79,23 @@ export function LeaderboardRow({ entry }: { entry: LeaderboardEntry }) {
         <PositionBadge position={entry.position} />
       </div>
 
-      <span className="flex-1 font-medium truncate" style={{ color: 'var(--text-primary)' }}>
-        {entry.name}
-        {entry.isCurrentUser && (
-          <span className="ml-2 text-xs font-normal" style={{ color: 'var(--brand-green)' }}>
-            (você)
-          </span>
+      <div className="flex-1 min-w-0">
+        <span className="font-medium truncate block" style={{ color: 'var(--text-primary)' }}>
+          {entry.name}
+          {entry.isCurrentUser && (
+            <span className="ml-2 text-xs font-normal" style={{ color: 'var(--brand-green)' }}>
+              (você)
+            </span>
+          )}
+        </span>
+        {(entry.grupo_pts > 0 || entry.bracket_pts > 0) && (
+          <div className="flex gap-1 mt-0.5 flex-wrap">
+            <PtsPill label="Jogos" value={entry.jogos_pts} />
+            <PtsPill label="Grupo" value={entry.grupo_pts} />
+            <PtsPill label="Bracket" value={entry.bracket_pts} />
+          </div>
         )}
-      </span>
+      </div>
 
       <span
         className="font-display text-lg tabular-nums flex-shrink-0"

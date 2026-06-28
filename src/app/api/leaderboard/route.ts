@@ -19,19 +19,23 @@ export async function GET() {
 
   const admin = createAdminClient();
 
-  const [{ data: allPreds }, { data: liveMatches }] = await Promise.all([
+  const [{ data: allPreds }, { data: liveMatches }, { data: groupPts }, { data: bracketPts }] = await Promise.all([
     admin.from('predictions').select('user_id, points'),
     admin.from('matches').select('id, home_goals, away_goals').eq('status', 'live'),
+    admin.from('group_position_points').select('user_id, correct_positions'),
+    admin.from('bracket_picks').select('user_id, points').eq('is_submitted', true),
   ]);
 
   const hasLive = (liveMatches?.length ?? 0) > 0;
 
-  const totals = new Map<string, number>();
+  // Aggregate jogos_pts (match prediction points)
+  const jogosTotals = new Map<string, number>();
   for (const p of allPreds ?? []) {
-    if (!totals.has(p.user_id)) totals.set(p.user_id, 0);
-    if (p.points != null) totals.set(p.user_id, (totals.get(p.user_id) ?? 0) + p.points);
+    if (!jogosTotals.has(p.user_id)) jogosTotals.set(p.user_id, 0);
+    if (p.points != null) jogosTotals.set(p.user_id, (jogosTotals.get(p.user_id) ?? 0) + p.points);
   }
 
+  // Add live in-progress points to jogos totals
   if (hasLive) {
     for (const match of liveMatches!) {
       if (match.home_goals === null || match.away_goals === null) continue;
@@ -44,17 +48,48 @@ export async function GET() {
 
       for (const p of preds ?? []) {
         const pts = calcPoints(p.home_goals, p.away_goals, match.home_goals, match.away_goals);
-        totals.set(p.user_id, (totals.get(p.user_id) ?? 0) + pts);
+        jogosTotals.set(p.user_id, (jogosTotals.get(p.user_id) ?? 0) + pts);
       }
     }
   }
 
-  if (totals.size === 0) {
+  // Aggregate grupo_pts
+  const grupoTotals = new Map<string, number>();
+  for (const g of groupPts ?? []) {
+    grupoTotals.set(g.user_id, (grupoTotals.get(g.user_id) ?? 0) + g.correct_positions);
+  }
+
+  // Aggregate bracket_pts
+  const bracketTotals = new Map<string, number>();
+  for (const b of bracketPts ?? []) {
+    if (b.points != null) {
+      bracketTotals.set(b.user_id, (bracketTotals.get(b.user_id) ?? 0) + b.points);
+    }
+  }
+
+  // Union all user IDs
+  const allUserIds = new Set([
+    ...jogosTotals.keys(),
+    ...grupoTotals.keys(),
+    ...bracketTotals.keys(),
+  ]);
+
+  if (allUserIds.size === 0) {
     return NextResponse.json({ entries: [], hasLive });
   }
 
-  const sorted = [...totals.entries()].sort((a, b) => b[1] - a[1]);
-  const userIds = sorted.map(([id]) => id);
+  // Sort by total descending
+  const sorted = [...allUserIds]
+    .map(uid => ({
+      userId: uid,
+      jogosPts: jogosTotals.get(uid) ?? 0,
+      grupoPts: grupoTotals.get(uid) ?? 0,
+      bracketPts: bracketTotals.get(uid) ?? 0,
+      total: (jogosTotals.get(uid) ?? 0) + (grupoTotals.get(uid) ?? 0) + (bracketTotals.get(uid) ?? 0),
+    }))
+    .sort((a, b) => b.total - a.total);
+
+  const userIds = sorted.map(s => s.userId);
 
   const { data: users } = await admin.from('users').select('id, name').in('id', userIds);
   const nameMap = new Map((users ?? []).map((u: { id: string; name: string }) => [u.id, u.name]));
@@ -88,16 +123,19 @@ export async function GET() {
     }
   }
 
-  const entries: LeaderboardEntry[] = sorted.map(([userId, points], i) => {
+  const entries: LeaderboardEntry[] = sorted.map((s, i) => {
     const position = i + 1;
-    const prevPosition = prevPositionMap.get(userId);
+    const prevPosition = prevPositionMap.get(s.userId);
     const delta = prevPosition != null ? prevPosition - position : null;
     return {
       position,
-      name: nameMap.get(userId) ?? 'Desconhecido',
-      points,
+      name: nameMap.get(s.userId) ?? 'Desconhecido',
+      points: s.total,
+      jogos_pts: s.jogosPts,
+      grupo_pts: s.grupoPts,
+      bracket_pts: s.bracketPts,
       delta,
-      isCurrentUser: userId === currentUserId,
+      isCurrentUser: s.userId === currentUserId,
     };
   });
 

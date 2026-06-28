@@ -9,39 +9,68 @@ import { LeaderboardClient } from '@/components/leaderboard/LeaderboardClient';
 async function getLeaderboard(currentUserId: string | null): Promise<{ entries: LeaderboardEntry[]; hasLive: boolean }> {
   const admin = createAdminClient();
 
-  // 1. All predictions (confirmed bets) + live matches in parallel
-  const [{ data: predData }, { data: liveMatches }] = await Promise.all([
+  // Fetch all three point sources + live match check in parallel
+  const [{ data: predData }, { data: liveMatches }, { data: groupPts }, { data: bracketPts }] = await Promise.all([
     admin.from('predictions').select('user_id, points'),
     admin.from('matches').select('id').eq('status', 'live').limit(1),
+    admin.from('group_position_points').select('user_id, correct_positions'),
+    admin.from('bracket_picks').select('user_id, points').eq('is_submitted', true),
   ]);
 
   const hasLive = (liveMatches?.length ?? 0) > 0;
 
-  if (!predData?.length) return { entries: [], hasLive };
-
-  // 2. Aggregate points per user — seed everyone with 0 so all bettors appear
-  const totals = new Map<string, number>();
-  for (const p of predData) {
-    if (!totals.has(p.user_id)) totals.set(p.user_id, 0);
-    if (p.points != null) totals.set(p.user_id, (totals.get(p.user_id) ?? 0) + p.points);
+  if (!predData?.length && !groupPts?.length && !bracketPts?.length) {
+    return { entries: [], hasLive };
   }
 
-  // 3. Sort descending and assign current positions
-  const sorted = [...totals.entries()].sort((a, b) => b[1] - a[1]);
-  const userIds = sorted.map(([id]) => id);
+  // Aggregate jogos_pts
+  const jogosTotals = new Map<string, number>();
+  for (const p of predData ?? []) {
+    if (!jogosTotals.has(p.user_id)) jogosTotals.set(p.user_id, 0);
+    if (p.points != null) jogosTotals.set(p.user_id, (jogosTotals.get(p.user_id) ?? 0) + p.points);
+  }
 
-  // 4. Fetch user names
-  const { data: users } = await admin
-    .from('users')
-    .select('id, name')
-    .in('id', userIds);
-  const nameMap = new Map(
-    (users ?? []).map((u: { id: string; name: string }) => [u.id, u.name])
-  );
+  // Aggregate grupo_pts
+  const grupoTotals = new Map<string, number>();
+  for (const g of groupPts ?? []) {
+    grupoTotals.set(g.user_id, (grupoTotals.get(g.user_id) ?? 0) + g.correct_positions);
+  }
 
-  // 5. Find the two most recent distinct match_ids that have snapshots.
-  //    seenMatchIds[0] = most recent (= current state), seenMatchIds[1] = previous.
-  //    We compare live vs previous to show the delta caused by the last processed match.
+  // Aggregate bracket_pts
+  const bracketTotals = new Map<string, number>();
+  for (const b of bracketPts ?? []) {
+    if (b.points != null) {
+      bracketTotals.set(b.user_id, (bracketTotals.get(b.user_id) ?? 0) + b.points);
+    }
+  }
+
+  // Union all user IDs
+  const allUserIds = new Set([
+    ...jogosTotals.keys(),
+    ...grupoTotals.keys(),
+    ...bracketTotals.keys(),
+  ]);
+
+  if (allUserIds.size === 0) return { entries: [], hasLive };
+
+  // Sort by total descending
+  const sorted = [...allUserIds]
+    .map(uid => ({
+      userId: uid,
+      jogosPts: jogosTotals.get(uid) ?? 0,
+      grupoPts: grupoTotals.get(uid) ?? 0,
+      bracketPts: bracketTotals.get(uid) ?? 0,
+      total: (jogosTotals.get(uid) ?? 0) + (grupoTotals.get(uid) ?? 0) + (bracketTotals.get(uid) ?? 0),
+    }))
+    .sort((a, b) => b.total - a.total);
+
+  const userIds = sorted.map(s => s.userId);
+
+  // Fetch names
+  const { data: users } = await admin.from('users').select('id, name').in('id', userIds);
+  const nameMap = new Map((users ?? []).map((u: { id: string; name: string }) => [u.id, u.name]));
+
+  // Delta logic (unchanged from existing)
   const { data: snapRows } = await admin
     .from('leaderboard_snapshots')
     .select('match_id, created_at')
@@ -59,7 +88,6 @@ async function getLeaderboard(currentUserId: string | null): Promise<{ entries: 
   }
   const prevMatchId = seenMatchIds[1] ?? null;
 
-  // 6. Fetch previous snapshot positions
   const prevPositionMap = new Map<string, number>();
   if (prevMatchId) {
     const { data: prevSnaps } = await admin
@@ -71,17 +99,19 @@ async function getLeaderboard(currentUserId: string | null): Promise<{ entries: 
     }
   }
 
-  // 7. Build final entries
-  const entries = sorted.map(([userId, points], i) => {
+  const entries: LeaderboardEntry[] = sorted.map((s, i) => {
     const position = i + 1;
-    const prevPosition = prevPositionMap.get(userId);
+    const prevPosition = prevPositionMap.get(s.userId);
     const delta = prevPosition != null ? prevPosition - position : null;
     return {
       position,
-      name: nameMap.get(userId) ?? 'Desconhecido',
-      points,
+      name: nameMap.get(s.userId) ?? 'Desconhecido',
+      points: s.total,
+      jogos_pts: s.jogosPts,
+      grupo_pts: s.grupoPts,
+      bracket_pts: s.bracketPts,
       delta,
-      isCurrentUser: userId === currentUserId,
+      isCurrentUser: s.userId === currentUserId,
     };
   });
 
