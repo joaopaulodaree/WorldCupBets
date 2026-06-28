@@ -21,7 +21,7 @@ CREATE INDEX idx_knockout_matches_status ON public.knockout_matches(status);
 -- Picks de cada usuário no bracket (draft vive no localStorage; banco só tem is_submitted=true)
 CREATE TABLE public.bracket_picks (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  user_id uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
   round smallint NOT NULL CHECK (round IN (5,6,7,8,9)),
   slot smallint NOT NULL,
   team_id uuid NOT NULL REFERENCES public.teams(id),
@@ -38,7 +38,7 @@ CREATE INDEX idx_bracket_picks_user ON public.bracket_picks(user_id);
 -- Pontos de posição de grupo (calculado batch quando grupos fecham)
 CREATE TABLE public.group_position_points (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  user_id uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
   group_name char(1) NOT NULL,
   correct_positions smallint NOT NULL DEFAULT 0 CHECK (correct_positions BETWEEN 0 AND 2),
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -51,11 +51,8 @@ CREATE POLICY "Public can read knockout_matches"
   ON public.knockout_matches FOR SELECT USING (true);
 
 ALTER TABLE public.bracket_picks ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Users can read own bracket_picks"
-  ON public.bracket_picks FOR SELECT USING (auth.uid() = user_id);
-CREATE POLICY "Users can insert own bracket_picks"
-  ON public.bracket_picks FOR INSERT WITH CHECK (auth.uid() = user_id);
--- No UPDATE policy for users: cron uses service_role (bypasses RLS) to update is_correct/points
+-- No RLS policies needed — all access goes through service role key in API routes
+-- (App uses custom auth in public.users, not Supabase Auth, so auth.uid() is always null)
 
 ALTER TABLE public.group_position_points ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Public can read group_position_points"

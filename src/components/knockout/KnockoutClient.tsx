@@ -12,8 +12,8 @@ export type BracketState =
   | 'completed';
 
 const ROUND_LABELS: Record<number, string> = {
-  5: 'Oitavas',
-  6: 'Dezesseis-avos',
+  5: '32-avos',    // R32: 16 matches
+  6: 'Oitavas',   // R16: 8 matches
   7: 'Quartas',
   8: 'Semi',
   9: 'Final',
