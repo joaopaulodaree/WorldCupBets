@@ -32,6 +32,15 @@ const navItems = [
       </svg>
     ),
   },
+  {
+    href: '/knockout',
+    label: 'Mata-mata',
+    icon: (
+      <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.75}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2v-4M9 21H5a2 2 0 01-2-2v-4m0 0h18" />
+      </svg>
+    ),
+  },
 ];
 
 export function BottomNav() {
