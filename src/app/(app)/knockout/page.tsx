@@ -17,6 +17,9 @@ interface RawMatch {
   away_team: RawTeam;
 }
 
+const ROUND_EXPECTED: Record<number, number> = { 5: 16, 6: 8, 7: 4, 8: 2, 9: 1 };
+const ROUNDS = [5, 6, 7, 8, 9] as const;
+
 async function getBracketData(userId: string | null) {
   const admin = createAdminClient();
 
@@ -39,20 +42,10 @@ async function getBracketData(userId: string | null) {
       bracketState: 'locked_pending_groups' as BracketState,
       matches: [] as KnockoutMatchWithTeams[],
       existingPicks: {} as Record<string, string>,
+      roundLocked: {} as Record<number, boolean>,
+      submittedRounds: {} as Record<number, boolean>,
     };
   }
-
-  // Check lock: has first R32 match started?
-  const { data: firstR32 } = await admin
-    .from('knockout_matches')
-    .select('kickoff_at')
-    .eq('round', 5)
-    .not('kickoff_at', 'is', null)
-    .order('kickoff_at', { ascending: true })
-    .limit(1);
-
-  const firstKickoff = firstR32?.[0]?.kickoff_at ? new Date(firstR32[0].kickoff_at) : null;
-  const bracketLocked = firstKickoff ? firstKickoff <= new Date() : false;
 
   // Fetch all knockout matches with team info
   const { data: rawMatches } = await admin
@@ -76,8 +69,25 @@ async function getBracketData(userId: string | null) {
     awayTeam: m.away_team ? { id: m.away_team.id, name: m.away_team.name, code: m.away_team.code, flagUrl: m.away_team.flag_url } : null,
   }));
 
+  // Compute per-round lock: a round is locked once its first match kicks off
+  const now = new Date();
+  const roundLocked: Record<number, boolean> = {};
+  for (const round of ROUNDS) {
+    const kickoffs = matches
+      .filter(m => m.round === round && m.kickoffAt != null)
+      .map(m => new Date(m.kickoffAt!));
+    if (kickoffs.length === 0) {
+      roundLocked[round] = false;
+    } else {
+      const firstKickoff = kickoffs.reduce((min, t) => (t < min ? t : min));
+      roundLocked[round] = firstKickoff <= now;
+    }
+  }
+
   // Fetch existing picks for logged-in user
   const existingPicks: Record<string, string> = {};
+  const submittedRounds: Record<number, boolean> = {};
+
   if (userId) {
     const { data: picksData } = await admin
       .from('bracket_picks')
@@ -88,22 +98,28 @@ async function getBracketData(userId: string | null) {
     for (const p of picksData ?? []) {
       existingPicks[`${p.round}-${p.slot}`] = p.team_id;
     }
+
+    // Round is "submitted" when user has all expected picks for it
+    for (const round of ROUNDS) {
+      const count = (picksData ?? []).filter(p => p.round === round).length;
+      submittedRounds[round] = count >= (ROUND_EXPECTED[round] ?? 0);
+    }
   }
 
-  // Determine bracket state
-  const hasSubmitted = userId ? Object.keys(existingPicks).length > 0 : false;
+  // Determine top-level bracket state
   const allFinished = matches.length > 0 && matches.every(m => m.status === 'finished');
+  const anyRoundOpen = ROUNDS.some(r => !roundLocked[r]);
 
   let bracketState: BracketState;
-  if (!bracketLocked) {
-    bracketState = 'available_for_picks';
-  } else if (allFinished) {
+  if (allFinished) {
     bracketState = 'completed';
+  } else if (anyRoundOpen) {
+    bracketState = 'available_for_picks';
   } else {
-    bracketState = hasSubmitted ? 'results_revealing' : 'picks_locked';
+    bracketState = 'results_revealing';
   }
 
-  return { bracketState, matches, existingPicks };
+  return { bracketState, matches, existingPicks, roundLocked, submittedRounds };
 }
 
 export default async function KnockoutPage() {
@@ -114,10 +130,12 @@ export default async function KnockoutPage() {
   let bracketState: BracketState = 'locked_pending_groups';
   let matches: KnockoutMatchWithTeams[] = [];
   let existingPicks: Record<string, string> = {};
+  let roundLocked: Record<number, boolean> = {};
+  let submittedRounds: Record<number, boolean> = {};
   let error: string | null = null;
 
   try {
-    ({ bracketState, matches, existingPicks } = await getBracketData(user?.id ?? null));
+    ({ bracketState, matches, existingPicks, roundLocked, submittedRounds } = await getBracketData(user?.id ?? null));
   } catch (e) {
     error = e instanceof Error ? e.message : 'Erro ao carregar mata-mata';
   }
@@ -139,6 +157,8 @@ export default async function KnockoutPage() {
           existingPicks={existingPicks}
           bracketState={bracketState}
           userId={user?.id ?? ''}
+          roundLocked={roundLocked}
+          submittedRounds={submittedRounds}
         />
       )}
     </div>

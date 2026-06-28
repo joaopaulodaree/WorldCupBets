@@ -12,8 +12,8 @@ export type BracketState =
   | 'completed';
 
 const ROUND_LABELS: Record<number, string> = {
-  5: '32-avos',    // R32: 16 matches
-  6: 'Oitavas',   // R16: 8 matches
+  5: '32-avos',
+  6: 'Oitavas',
   7: 'Quartas',
   8: 'Semi',
   9: 'Final',
@@ -27,21 +27,31 @@ interface Props {
   existingPicks: Record<string, string>; // "round-slot" → teamId
   bracketState: BracketState;
   userId: string;
+  roundLocked: Record<number, boolean>;
+  submittedRounds: Record<number, boolean>;
 }
 
 function draftKey(userId: string) {
   return `mata-mata-draft-${userId}`;
 }
 
-export function KnockoutClient({ matches, existingPicks, bracketState, userId }: Props) {
-  const [activeRound, setActiveRound] = useState(5);
+export function KnockoutClient({
+  matches,
+  existingPicks,
+  bracketState,
+  userId,
+  roundLocked,
+  submittedRounds: initialSubmittedRounds,
+}: Props) {
+  // Default to the first open round, falling back to round 5
+  const firstOpenRound = ROUNDS.find(r => !roundLocked[r]) ?? 5;
+  const [activeRound, setActiveRound] = useState(firstOpenRound);
+
   const [picks, setPicks] = useState<Record<string, string>>(() => {
-    // Seed from existing submitted picks; then merge localStorage draft
     const base = { ...existingPicks };
     if (typeof window !== 'undefined') {
       try {
         const draft = JSON.parse(localStorage.getItem(draftKey(userId)) ?? '{}') as Record<string, string>;
-        // Draft only applies if bracket is still open
         if (bracketState === 'available_for_picks') {
           Object.assign(base, draft);
         }
@@ -51,13 +61,12 @@ export function KnockoutClient({ matches, existingPicks, bracketState, userId }:
     }
     return base;
   });
-  const [submitting, setSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState(bracketState !== 'available_for_picks' && Object.keys(existingPicks).length > 0);
-  const [submitError, setSubmitError] = useState<string | null>(null);
 
-  const locked = bracketState !== 'available_for_picks';
+  const [submittedRounds, setSubmittedRounds] = useState<Record<number, boolean>>(initialSubmittedRounds);
+  const [submitting, setSubmitting] = useState<number | null>(null); // round currently being submitted
+  const [submitErrors, setSubmitErrors] = useState<Record<number, string>>({});
 
-  // Persist draft to localStorage on every pick change
+  // Persist draft picks to localStorage
   useEffect(() => {
     if (bracketState !== 'available_for_picks') return;
     try {
@@ -68,52 +77,59 @@ export function KnockoutClient({ matches, existingPicks, bracketState, userId }:
   }, [picks, userId, bracketState]);
 
   const handlePick = useCallback((round: number, slot: number, teamId: string) => {
-    const key = `${round}-${slot}`;
-    setPicks(prev => ({ ...prev, [key]: teamId }));
+    setPicks(prev => ({ ...prev, [`${round}-${slot}`]: teamId }));
   }, []);
 
-  const totalPicks = Object.keys(picks).length;
   const roundPickCount = (round: number) =>
     Object.keys(picks).filter(k => k.startsWith(`${round}-`)).length;
 
-  const allPicksDone = totalPicks === 31;
+  async function handleRoundSubmit(round: number) {
+    if (submitting !== null) return;
+    setSubmitting(round);
+    setSubmitErrors(prev => { const n = { ...prev }; delete n[round]; return n; });
 
-  async function handleSubmit() {
-    if (!allPicksDone || submitting) return;
-    setSubmitting(true);
-    setSubmitError(null);
-
-    const pickList = Object.entries(picks).map(([key, teamId]) => {
-      const [round, slot] = key.split('-').map(Number);
-      return { round, slot, teamId };
-    });
+    const expectedSlots = ROUND_SLOTS[round];
+    const pickList = Array.from({ length: expectedSlots }, (_, s) => ({
+      slot: s,
+      teamId: picks[`${round}-${s}`] ?? '',
+    }));
 
     try {
       const res = await fetch('/api/bracket/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ picks: pickList }),
+        body: JSON.stringify({ round, picks: pickList }),
       });
 
       if (res.status === 409) {
-        // Already submitted — treat as success
-        setSubmitted(true);
-        try { localStorage.removeItem(draftKey(userId)); } catch { /* ignore */ }
+        // Round already locked or already submitted — treat as success
+        setSubmittedRounds(prev => ({ ...prev, [round]: true }));
+        clearDraftRound(round, expectedSlots);
         return;
       }
 
       if (!res.ok) {
         const body = await res.json() as { error?: string };
-        setSubmitError(body.error ?? 'Erro ao enviar bracket');
+        setSubmitErrors(prev => ({ ...prev, [round]: body.error ?? 'Erro ao enviar picks' }));
         return;
       }
 
-      setSubmitted(true);
-      try { localStorage.removeItem(draftKey(userId)); } catch { /* ignore */ }
+      setSubmittedRounds(prev => ({ ...prev, [round]: true }));
+      clearDraftRound(round, expectedSlots);
     } catch {
-      setSubmitError('Erro de rede. Tente novamente.');
+      setSubmitErrors(prev => ({ ...prev, [round]: 'Erro de rede. Tente novamente.' }));
     } finally {
-      setSubmitting(false);
+      setSubmitting(null);
+    }
+  }
+
+  function clearDraftRound(round: number, slotCount: number) {
+    try {
+      const draft = JSON.parse(localStorage.getItem(draftKey(userId)) ?? '{}') as Record<string, string>;
+      for (let s = 0; s < slotCount; s++) delete draft[`${round}-${s}`];
+      localStorage.setItem(draftKey(userId), JSON.stringify(draft));
+    } catch {
+      // ignore storage errors
     }
   }
 
@@ -137,6 +153,12 @@ export function KnockoutClient({ matches, existingPicks, bracketState, userId }:
       </div>
     );
   }
+
+  const isRoundLocked = roundLocked[activeRound] ?? false;
+  const isRoundSubmitted = submittedRounds[activeRound] ?? false;
+  const activePickCount = roundPickCount(activeRound);
+  const activeExpected = ROUND_SLOTS[activeRound] ?? 0;
+  const allActivePicksDone = activePickCount === activeExpected;
 
   return (
     <div className="space-y-4">
@@ -162,42 +184,64 @@ export function KnockoutClient({ matches, existingPicks, bracketState, userId }:
             match={match}
             pick={picks[`${match.round}-${match.slot}`] ?? null}
             onPick={(teamId) => handlePick(match.round, match.slot, teamId)}
-            locked={locked || submitted}
+            locked={isRoundLocked || isRoundSubmitted}
           />
         ))}
       </div>
 
-      {/* Submit button */}
-      {bracketState === 'available_for_picks' && !submitted && (
+      {/* Per-round submit button — only for open, unsubmitted rounds */}
+      {!isRoundLocked && !isRoundSubmitted && (
         <div className="sticky bottom-20 pt-2">
-          {submitError && (
-            <p className="text-center text-sm mb-2" style={{ color: '#EF4444' }}>{submitError}</p>
+          {submitErrors[activeRound] && (
+            <p className="text-center text-sm mb-2" style={{ color: '#EF4444' }}>
+              {submitErrors[activeRound]}
+            </p>
           )}
           <button
-            onClick={handleSubmit}
-            disabled={!allPicksDone || submitting}
+            onClick={() => handleRoundSubmit(activeRound)}
+            disabled={!allActivePicksDone || submitting !== null}
             className="w-full py-4 rounded-2xl font-bold text-base transition-all"
             style={{
-              background: allPicksDone ? 'var(--brand-green)' : 'var(--bg-secondary)',
-              color: allPicksDone ? '#000' : 'var(--text-tertiary)',
-              cursor: allPicksDone ? 'pointer' : 'default',
+              background: allActivePicksDone ? 'var(--brand-green)' : 'var(--bg-secondary)',
+              color: allActivePicksDone ? '#000' : 'var(--text-tertiary)',
+              cursor: allActivePicksDone ? 'pointer' : 'default',
             }}
           >
-            {submitting ? 'Enviando…' : allPicksDone ? `Confirmar bracket (${totalPicks}/31)` : `Preencha todos os picks (${totalPicks}/31)`}
+            {submitting === activeRound
+              ? 'Enviando…'
+              : allActivePicksDone
+              ? `Confirmar ${ROUND_LABELS[activeRound]} (${activePickCount}/${activeExpected})`
+              : `Preencha os picks (${activePickCount}/${activeExpected})`}
           </button>
         </div>
       )}
 
-      {submitted && (
+      {/* Round submitted confirmation */}
+      {isRoundSubmitted && (
         <div
           className="rounded-2xl p-4 text-center"
           style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.3)' }}
         >
           <p className="font-semibold" style={{ color: 'var(--brand-green)' }}>
-            ✓ Bracket confirmado!
+            ✓ {ROUND_LABELS[activeRound]} confirmado!
           </p>
           <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
             Acompanhe os resultados aqui conforme os jogos acontecem.
+          </p>
+        </div>
+      )}
+
+      {/* Round locked without submission */}
+      {isRoundLocked && !isRoundSubmitted && (
+        <div
+          className="rounded-2xl p-4 text-center"
+          style={{ background: 'var(--bg-card)', border: '1px solid var(--border-color)' }}
+        >
+          <p className="font-semibold" style={{ color: 'var(--text-secondary)' }}>
+            🔒 {ROUND_LABELS[activeRound]} bloqueado — jogos já começaram
+          </p>
+          <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
+            Seus picks não foram confirmados a tempo para esta rodada.
           </p>
         </div>
       )}
