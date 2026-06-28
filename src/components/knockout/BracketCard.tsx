@@ -63,7 +63,7 @@ function TeamSlot({
       disabled={disabled}
     >
       {team.flagUrl ? (
-        <Image src={team.flagUrl} alt={team.name} width={24} height={16} className="rounded-sm flex-shrink-0 object-cover" style={{ width: 24, height: 16 }} />
+        <Image src={team.flagUrl} alt={team.name} width={24} height={16} className="rounded-sm flex-shrink-0 object-cover" style={{ width: 24, height: 16 }} unoptimized />
       ) : (
         <div className="w-6 h-4 rounded bg-gray-600 flex-shrink-0" />
       )}

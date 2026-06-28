@@ -5,29 +5,28 @@ import { createAdminClient } from '@/lib/supabase/admin';
 
 export const dynamic = 'force-dynamic';
 
-const EXPECTED_SLOTS: Record<number, number> = {
-  5: 16, // R32
-  6: 8,  // R16
-  7: 4,  // QF
-  8: 2,  // SF
-  9: 1,  // Final
-};
+const VALID_ROUNDS = new Set([5, 6, 7, 8, 9]);
 
 interface PickInput {
   slot: number;
   teamId: string;
 }
 
+interface RoundMatch {
+  slot: number;
+  kickoff_at: string | null;
+  home_team_id: string | null;
+  away_team_id: string | null;
+}
+
 export async function POST(request: Request) {
-  // 1. Auth check
+  // 1. Auth
   const cookieStore = await cookies();
   const token = cookieStore.get(COOKIE_NAME)?.value;
   const user = token ? await verifyToken(token) : null;
   if (!user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
-
-  const admin = createAdminClient();
 
   // 2. Parse body
   let body: { round?: number; picks?: PickInput[] };
@@ -41,67 +40,51 @@ export async function POST(request: Request) {
   const picks = body?.picks;
 
   // 3. Validate round
-  if (typeof round !== 'number' || !(round in EXPECTED_SLOTS)) {
+  if (typeof round !== 'number' || !VALID_ROUNDS.has(round)) {
     return NextResponse.json({ error: 'Rodada inválida' }, { status: 400 });
   }
 
-  const expectedCount = EXPECTED_SLOTS[round];
-
-  // 4. Validate picks count and slot coverage
-  if (!Array.isArray(picks) || picks.length !== expectedCount) {
-    return NextResponse.json(
-      { error: `Rodada ${round}: envie exatamente ${expectedCount} picks` },
-      { status: 400 }
-    );
+  // 4. Validate picks array
+  if (!Array.isArray(picks) || picks.length === 0) {
+    return NextResponse.json({ error: 'Nenhum pick enviado' }, { status: 400 });
   }
 
-  const slots = new Set(picks.map(p => p.slot));
-  for (let s = 0; s < expectedCount; s++) {
-    if (!slots.has(s)) {
-      return NextResponse.json(
-        { error: `Rodada ${round}: slot ${s} não preenchido` },
-        { status: 400 }
-      );
-    }
-  }
+  const admin = createAdminClient();
 
-  // 5. Check this round hasn't started (first match kickoff)
-  const { data: firstMatch } = await admin
+  // 5. Fetch all match info for the round (kickoff + teams)
+  const { data: roundMatchesRaw } = await admin
     .from('knockout_matches')
-    .select('kickoff_at')
-    .eq('round', round)
-    .not('kickoff_at', 'is', null)
-    .order('kickoff_at', { ascending: true })
-    .limit(1);
+    .select('slot, kickoff_at, home_team_id, away_team_id')
+    .eq('round', round);
 
-  if (firstMatch?.[0]?.kickoff_at) {
-    const firstKickoff = new Date(firstMatch[0].kickoff_at);
-    if (firstKickoff <= new Date()) {
-      return NextResponse.json(
-        { error: `Rodada ${round} já começou — picks não aceitos` },
-        { status: 409 }
-      );
-    }
+  const matchBySlot = new Map<number, RoundMatch>(
+    ((roundMatchesRaw ?? []) as RoundMatch[]).map(m => [m.slot, m])
+  );
+
+  const now = new Date();
+
+  // 6. Keep only valid picks: unlocked match, both teams set, teamId is one of them
+  const validPicks: PickInput[] = [];
+  for (const p of picks) {
+    if (typeof p.slot !== 'number' || !p.teamId) continue;
+    const match = matchBySlot.get(p.slot);
+    if (!match) continue;
+    if (!match.home_team_id || !match.away_team_id) continue;
+    if (p.teamId !== match.home_team_id && p.teamId !== match.away_team_id) continue;
+    if (match.kickoff_at && new Date(match.kickoff_at) <= now) continue;
+    validPicks.push(p);
   }
 
-  // 6. Check this round's slots are populated with real teams
-  const { count: populatedSlots } = await admin
-    .from('knockout_matches')
-    .select('id', { count: 'exact', head: true })
-    .eq('round', round)
-    .not('home_team_id', 'is', null)
-    .not('away_team_id', 'is', null);
-
-  if ((populatedSlots ?? 0) < expectedCount) {
+  if (validPicks.length === 0) {
     return NextResponse.json(
-      { error: `Chaveamento da rodada ${round} ainda não definido` },
+      { error: 'Nenhum pick válido — jogos já começaram ou equipes não definidas' },
       { status: 409 }
     );
   }
 
-  // 7. Upsert picks for this round (allows re-submission before deadline)
+  // 7. Upsert valid picks (allows re-submission before kickoff)
   const submittedAt = new Date().toISOString();
-  const rows = picks.map(p => ({
+  const rows = validPicks.map(p => ({
     user_id: user.id,
     round,
     slot: p.slot,
