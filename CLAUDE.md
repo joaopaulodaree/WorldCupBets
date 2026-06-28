@@ -15,7 +15,17 @@
 - Deploy status: `vercel ls --prod`
 - Health check: `curl -sf -L https://worldcupbets-app.vercel.app -o /dev/null -w "%{http_code}"`
 
-### Cron sync (results every 5min)
-- Handled by GitHub Actions: `.github/workflows/sync-results.yml`
-- Endpoint: `/api/cron/sync-results` with `Authorization: Bearer $CRON_SECRET`
-- Required GitHub secrets: `CRON_SECRET`, `APP_URL=https://worldcupbets-app.vercel.app`
+### Cron sync (via cron-job.org — every 5min)
+All cron endpoints use GET with `Authorization: Bearer $CRON_SECRET` header.
+Register the following 3 jobs in cron-job.org (every 5 min):
+
+1. `https://worldcupbets-app.vercel.app/api/cron/sync-results`
+   - Syncs group match scores + upserts knockout_matches from worldcup26.ir API
+
+2. `https://worldcupbets-app.vercel.app/api/cron/sync-group-points`
+   - Calculates group position points (runs after all group matches finish)
+
+3. `https://worldcupbets-app.vercel.app/api/cron/sync-bracket-points`
+   - Scores bracket picks when knockout_matches.winner_team_id is set
+
+Required env var: `CRON_SECRET` (set in Vercel project settings)
