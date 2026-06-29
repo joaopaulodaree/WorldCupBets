@@ -68,7 +68,7 @@ function TeamRow({
         className="flex items-center gap-2 py-2 opacity-40"
         style={borderTop ? { borderTop: '1px solid var(--border-color)' } : undefined}
       >
-        <div className="w-6 h-4 rounded bg-gray-700 flex-shrink-0" />
+        <div className="w-6 h-4 rounded flex-shrink-0" style={{ background: 'var(--bg-tertiary)' }} />
         <span className="text-sm flex-1" style={{ color: 'var(--text-tertiary)' }}>
           A definir
         </span>
@@ -101,8 +101,8 @@ function TeamRow({
       >
         {team.name}
       </span>
-      {isWinner && !locked && (
-        <span className="text-green-400 text-xs flex-shrink-0 mr-1">▲</span>
+      {isWinner && locked && (
+        <span className="text-xs flex-shrink-0 mr-1" style={{ color: 'var(--brand-green)' }}>▲</span>
       )}
       {locked ? (
         <span
