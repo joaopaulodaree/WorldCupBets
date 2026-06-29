@@ -62,6 +62,13 @@ export function KnockoutClient({ matches, existingScorePicks, bracketState, user
       .map((m) => [`${m.round}-${m.slot}`, m.winnerTeamId!]),
   );
 
+  // Matches that have started or finished are locked individually regardless of bracket state
+  const startedMatchKeys = new Set(
+    matches
+      .filter((m) => m.status === 'live' || m.status === 'finished')
+      .map((m) => `${m.round}-${m.slot}`),
+  );
+
   const [activeRound, setActiveRound] = useState(5);
   const [scorePicks, setScorePicks] = useState<ScorePicks>(() => {
     // Initialize from existing submitted picks
@@ -231,7 +238,7 @@ export function KnockoutClient({ matches, existingScorePicks, bracketState, user
               awayGoals={pick?.awayGoals ?? ''}
               onHomeChange={(v) => handleGoalsChange(round, slot, 'home', v)}
               onAwayChange={(v) => handleGoalsChange(round, slot, 'away', v)}
-              locked={locked || submitted}
+              locked={locked || submitted || startedMatchKeys.has(key)}
               actualWinnerId={actualWinnerMap.get(key) ?? null}
             />
           );

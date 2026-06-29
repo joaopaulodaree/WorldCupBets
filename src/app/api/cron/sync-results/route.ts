@@ -219,6 +219,8 @@ async function syncKnockoutMatches(supabase: ReturnType<typeof getAdminClient>) 
       home_team_id: homeTeamId,
       away_team_id: awayTeamId,
       winner_team_id: winnerTeamId,
+      home_score: game.homeGoals ?? null,
+      away_score: game.awayGoals ?? null,
       kickoff_at: parseKickoffAt(game.localDate),
       status: game.status === 'scheduled' && (!homeTeamId || !awayTeamId) ? 'tbd' : game.status,
     };
