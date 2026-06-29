@@ -20,56 +20,90 @@ vi.mock('@/lib/supabase/admin', () => ({
   createAdminClient: () => mockAdmin,
 }));
 
-/** Build a chainable mock admin that:
- * - Returns empty array for the "check existing picks" select
- * - Returns a kickoff in the future for the "lock check"
- * - Returns count=16 for the "R32 populated" check
- * - Returns { error: null } for insert
+/**
+ * Build a chainable mock admin.
+ * The route makes these DB calls in order:
+ *  1. bracket_picks.select('id').eq().eq().limit(1)          → existing picks check
+ *  2. knockout_matches.select('round,slot').not().not()       → available matches (no .limit())
+ *  3. knockout_matches.select('kickoff_at').eq().not().order().limit(1) → lock check
+ *  4. bracket_picks.insert(rows)                              → insert picks
+ *
+ * We mock `from(table)` returning table-specific chains so that:
+ *  - bracket_picks chains resolve limit() → { data: [] } and insert() → { error: null }
+ *  - first knockout_matches chain (available matches) awaits directly → { data: [...] }
+ *  - second knockout_matches chain (lock check) resolves limit() → { data: [future kickoff] }
  */
-function buildMockAdmin() {
-  // Chainable builder for .select().eq()...limit() or .not()...order()...limit() etc.
-  // We use a single chain object that always resolves the terminal promise.
-  const makeChain = (terminalValue: unknown) => {
+function buildMockAdmin(availableMatchData?: Array<{ round: number; slot: number }>) {
+  // Default: all 31 slots populated
+  const defaultMatches = makeAllMatches();
+  const matchData = availableMatchData ?? defaultMatches;
+
+  // A thenable chain that also supports method chaining.
+  // When the route does `const { data } = await chain.not().not()`, the chain must be a
+  // thenable that resolves to { data: matchData }.
+  const makeAwaitableChain = (resolveValue: unknown) => {
     const chain: Record<string, unknown> = {};
-    const methods = ['select', 'eq', 'neq', 'not', 'order', 'limit', 'insert'];
+    const methods = ['select', 'eq', 'neq', 'not', 'order', 'limit'];
     for (const m of methods) {
       chain[m] = vi.fn(() => chain);
     }
-    // Override limit and insert to return the terminal promise
-    (chain.limit as ReturnType<typeof vi.fn>).mockResolvedValue(terminalValue);
-    (chain.insert as ReturnType<typeof vi.fn>).mockResolvedValue(terminalValue);
+    // Make the chain itself a thenable (so `await chain` works)
+    chain.then = (resolve: (v: unknown) => unknown) => Promise.resolve(resolveValue).then(resolve);
+    // Also make limit() resolve to the same value (for chains that do use .limit())
+    (chain.limit as ReturnType<typeof vi.fn>).mockResolvedValue(resolveValue);
     return chain;
   };
 
-  // Build separate chains per `from()` call
-  // Call order: bracket_picks (check existing), knockout_matches (lock), knockout_matches (count), bracket_picks (insert)
-  const existingPicksChain = makeChain({ data: [] });
-  const lockChain = makeChain({
-    data: [{ kickoff_at: new Date(Date.now() + 86400000).toISOString() }],
-  });
-  const countChain = makeChain({ count: 16 });
-  const insertChain = makeChain({ error: null });
-  // insert on the 4th from() call
-  (insertChain.insert as ReturnType<typeof vi.fn>).mockResolvedValue({ error: null });
+  let bracketPicksCallCount = 0;
+  let knockoutMatchesCallCount = 0;
 
-  let fromCallCount = 0;
-  const from = vi.fn(() => {
-    fromCallCount++;
-    if (fromCallCount === 1) return existingPicksChain; // bracket_picks select
-    if (fromCallCount === 2) return lockChain;           // knockout_matches lock
-    if (fromCallCount === 3) return countChain;          // knockout_matches count
-    return insertChain;                                   // bracket_picks insert
+  const from = vi.fn((table: string) => {
+    if (table === 'bracket_picks') {
+      bracketPicksCallCount++;
+      if (bracketPicksCallCount === 1) {
+        // existing picks check — returns empty array
+        return makeAwaitableChain({ data: [] });
+      }
+      // insert call
+      const insertChain = makeAwaitableChain({ error: null });
+      (insertChain.insert as ReturnType<typeof vi.fn>) = vi.fn().mockResolvedValue({ error: null });
+      insertChain.insert = vi.fn().mockResolvedValue({ error: null });
+      return insertChain;
+    }
+    if (table === 'knockout_matches') {
+      knockoutMatchesCallCount++;
+      if (knockoutMatchesCallCount === 1) {
+        // available matches query — awaited directly (no .limit())
+        return makeAwaitableChain({ data: matchData });
+      }
+      // lock check — uses .limit(1)
+      return makeAwaitableChain({
+        data: [{ kickoff_at: new Date(Date.now() + 86400000).toISOString() }],
+      });
+    }
+    return makeAwaitableChain({ data: null, error: null });
   });
 
   return { from };
 }
 
-function makeValidPicks() {
-  const picks: Array<{ round: number; slot: number; teamId: string }> = [];
+function makeAllMatches() {
+  const matches: Array<{ round: number; slot: number }> = [];
   const rounds: [number, number][] = [[5, 16], [6, 8], [7, 4], [8, 2], [9, 1]];
   for (const [round, count] of rounds) {
     for (let slot = 0; slot < count; slot++) {
-      picks.push({ round, slot, teamId: `team-${round}-${slot}` });
+      matches.push({ round, slot });
+    }
+  }
+  return matches;
+}
+
+function makeValidPicks() {
+  const picks: Array<{ round: number; slot: number; teamId: string; homeGoals: number; awayGoals: number }> = [];
+  const rounds: [number, number][] = [[5, 16], [6, 8], [7, 4], [8, 2], [9, 1]];
+  for (const [round, count] of rounds) {
+    for (let slot = 0; slot < count; slot++) {
+      picks.push({ round, slot, teamId: `team-${round}-${slot}`, homeGoals: 2, awayGoals: 1 });
     }
   }
   return picks;
@@ -81,7 +115,26 @@ describe('POST /api/bracket/submit', () => {
     mockAdmin = buildMockAdmin();
   });
 
-  test('returns 400 when picks.length !== 31', async () => {
+  test('returns 400 when a pick is a draw (homeGoals === awayGoals)', async () => {
+    const { POST } = await import('./route');
+
+    const picks = makeValidPicks();
+    // Make one pick a draw
+    picks[0] = { ...picks[0], homeGoals: 1, awayGoals: 1 };
+
+    const req = new Request('http://localhost/api/bracket/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ picks }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/empate/i);
+  });
+
+  test('returns 400 when picks.length does not match available matches', async () => {
     const { POST } = await import('./route');
 
     const shortPicks = makeValidPicks().slice(0, 10); // only 10 picks
@@ -94,6 +147,7 @@ describe('POST /api/bracket/submit', () => {
     const res = await POST(req);
     expect(res.status).toBe(400);
     const body = await res.json();
+    // Should say "Envie exatamente 31 picks"
     expect(body.error).toContain('31');
   });
 
@@ -104,7 +158,7 @@ describe('POST /api/bracket/submit', () => {
     const picks = makeValidPicks();
     // Remove one R5 pick and add one to R6 to shift counts but keep total=31
     const badPicks = picks.filter(p => !(p.round === 5 && p.slot === 15));
-    badPicks.push({ round: 6, slot: 8, teamId: 'extra-r6' });
+    badPicks.push({ round: 6, slot: 8, teamId: 'extra-r6', homeGoals: 2, awayGoals: 1 });
     // Now R5 has 15 (wrong), R6 has 9 (wrong), total=31
 
     const req = new Request('http://localhost/api/bracket/submit', {
@@ -127,7 +181,7 @@ describe('POST /api/bracket/submit', () => {
     // Replace slot 0 of round 5 with a duplicate of slot 1
     const badPicks = picks.map(p =>
       p.round === 5 && p.slot === 0
-        ? { round: 5, slot: 1, teamId: 'duplicate' }
+        ? { round: 5, slot: 1, teamId: 'duplicate', homeGoals: 2, awayGoals: 1 }
         : p
     );
     // Total is still 31, R5 still has 16 picks, but slot 0 is missing

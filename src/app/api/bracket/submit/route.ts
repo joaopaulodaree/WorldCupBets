@@ -5,20 +5,12 @@ import { createAdminClient } from '@/lib/supabase/admin';
 
 export const dynamic = 'force-dynamic';
 
-const EXPECTED_SLOTS: Record<number, number> = {
-  5: 16, // R32
-  6: 8,  // R16
-  7: 4,  // QF
-  8: 2,  // SF
-  9: 1,  // Final
-};
-
-const TOTAL_PICKS = 31;
-
 interface PickInput {
   round: number;
   slot: number;
   teamId: string;
+  homeGoals: number;
+  awayGoals: number;
 }
 
 export async function POST(request: Request) {
@@ -44,7 +36,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ alreadySubmitted: true }, { status: 409 });
   }
 
-  // 3. Parse body and validate picks count
+  // 3. Parse body
   let body: { picks?: PickInput[] };
   try {
     body = await request.json();
@@ -53,35 +45,60 @@ export async function POST(request: Request) {
   }
 
   const picks = body?.picks;
-  if (!Array.isArray(picks) || picks.length !== TOTAL_PICKS) {
+  if (!Array.isArray(picks) || picks.length === 0) {
+    return NextResponse.json({ error: 'Picks inválidos' }, { status: 400 });
+  }
+
+  // 4. Validate no draws
+  for (const pick of picks) {
+    if (pick.homeGoals === pick.awayGoals) {
+      return NextResponse.json(
+        { error: `Empate não permitido no mata-mata (rodada ${pick.round}, slot ${pick.slot})` },
+        { status: 400 }
+      );
+    }
+  }
+
+  // 5. Validate slot coverage against what's actually populated in the DB
+  const { data: availableMatches } = await admin
+    .from('knockout_matches')
+    .select('round, slot')
+    .not('home_team_id', 'is', null)
+    .not('away_team_id', 'is', null);
+
+  const expectedByRound = new Map<number, Set<number>>();
+  for (const m of availableMatches ?? []) {
+    if (!expectedByRound.has(m.round)) expectedByRound.set(m.round, new Set());
+    expectedByRound.get(m.round)!.add(m.slot);
+  }
+
+  const totalRequired = (availableMatches ?? []).length;
+  if (picks.length !== totalRequired) {
     return NextResponse.json(
-      { error: `Envie exatamente ${TOTAL_PICKS} picks` },
+      { error: `Envie exatamente ${totalRequired} picks` },
       { status: 400 }
     );
   }
 
-  // 4. Validate slot coverage per round
-  for (const [roundStr, expectedCount] of Object.entries(EXPECTED_SLOTS)) {
-    const round = parseInt(roundStr, 10);
+  for (const [round, slots] of expectedByRound) {
     const roundPicks = picks.filter(p => p.round === round);
-    if (roundPicks.length !== expectedCount) {
+    if (roundPicks.length !== slots.size) {
       return NextResponse.json(
-        { error: `Rodada ${round}: esperado ${expectedCount} picks, recebido ${roundPicks.length}` },
+        { error: `Rodada ${round}: esperado ${slots.size} picks, recebido ${roundPicks.length}` },
         { status: 400 }
       );
     }
-    const slots = new Set(roundPicks.map(p => p.slot));
-    for (let s = 0; s < expectedCount; s++) {
-      if (!slots.has(s)) {
+    for (const slot of slots) {
+      if (!roundPicks.some(p => p.slot === slot)) {
         return NextResponse.json(
-          { error: `Rodada ${round}: slot ${s} não preenchido` },
+          { error: `Rodada ${round}: slot ${slot} não preenchido` },
           { status: 400 }
         );
       }
     }
   }
 
-  // 5. Check bracket not locked (first R32 match hasn't started)
+  // 6. Check bracket not locked (first R32 match hasn't started)
   const { data: firstR32 } = await admin
     .from('knockout_matches')
     .select('kickoff_at')
@@ -100,28 +117,15 @@ export async function POST(request: Request) {
     }
   }
 
-  // 6. Check 16 R32 slots populated
-  const { count: populatedR32 } = await admin
-    .from('knockout_matches')
-    .select('id', { count: 'exact', head: true })
-    .eq('round', 5)
-    .not('home_team_id', 'is', null)
-    .not('away_team_id', 'is', null);
-
-  if ((populatedR32 ?? 0) < 16) {
-    return NextResponse.json(
-      { error: 'Chaveamento de Oitavas ainda não definido' },
-      { status: 409 }
-    );
-  }
-
-  // 7. Insert all 31 picks atomically
+  // 7. Insert picks with scores
   const submittedAt = new Date().toISOString();
   const rows = picks.map(p => ({
     user_id: user.id,
     round: p.round,
     slot: p.slot,
     team_id: p.teamId,
+    home_goals: p.homeGoals,
+    away_goals: p.awayGoals,
     is_submitted: true,
     submitted_at: submittedAt,
   }));
@@ -135,6 +139,5 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: insertError.message }, { status: 500 });
   }
 
-  // 8. Return success
   return NextResponse.json({ ok: true });
 }
