@@ -1,8 +1,7 @@
 import { cookies } from 'next/headers';
 import { verifyToken, COOKIE_NAME } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { KnockoutClient, type BracketState } from '@/components/knockout/KnockoutClient';
-import type { KnockoutMatchWithTeams } from '@/components/knockout/BracketCard';
+import { KnockoutClient, type BracketState, type KnockoutMatchWithTeams } from '@/components/knockout/KnockoutClient';
 
 type RawTeam = { id: string; name: string; code: string; flag_url: string } | null;
 
@@ -16,6 +15,8 @@ interface RawMatch {
   home_team: RawTeam;
   away_team: RawTeam;
 }
+
+type ExistingScorePicks = Record<string, { homeGoals: number | null; awayGoals: number | null }>;
 
 async function getBracketData(userId: string | null) {
   const admin = createAdminClient();
@@ -38,7 +39,7 @@ async function getBracketData(userId: string | null) {
     return {
       bracketState: 'locked_pending_groups' as BracketState,
       matches: [] as KnockoutMatchWithTeams[],
-      existingPicks: {} as Record<string, string>,
+      existingScorePicks: {} as ExistingScorePicks,
     };
   }
 
@@ -76,22 +77,25 @@ async function getBracketData(userId: string | null) {
     awayTeam: m.away_team ? { id: m.away_team.id, name: m.away_team.name, code: m.away_team.code, flagUrl: m.away_team.flag_url } : null,
   }));
 
-  // Fetch existing picks for logged-in user
-  const existingPicks: Record<string, string> = {};
+  // Fetch existing score picks for logged-in user
+  const existingScorePicks: ExistingScorePicks = {};
   if (userId) {
     const { data: picksData } = await admin
       .from('bracket_picks')
-      .select('round, slot, team_id')
+      .select('round, slot, home_goals, away_goals')
       .eq('user_id', userId)
       .eq('is_submitted', true);
 
     for (const p of picksData ?? []) {
-      existingPicks[`${p.round}-${p.slot}`] = p.team_id;
+      existingScorePicks[`${p.round}-${p.slot}`] = {
+        homeGoals: p.home_goals ?? null,
+        awayGoals: p.away_goals ?? null,
+      };
     }
   }
 
   // Determine bracket state
-  const hasSubmitted = userId ? Object.keys(existingPicks).length > 0 : false;
+  const hasSubmitted = userId ? Object.keys(existingScorePicks).length > 0 : false;
   const allFinished = matches.length > 0 && matches.every(m => m.status === 'finished');
 
   let bracketState: BracketState;
@@ -103,7 +107,7 @@ async function getBracketData(userId: string | null) {
     bracketState = hasSubmitted ? 'results_revealing' : 'picks_locked';
   }
 
-  return { bracketState, matches, existingPicks };
+  return { bracketState, matches, existingScorePicks };
 }
 
 export default async function KnockoutPage() {
@@ -113,11 +117,11 @@ export default async function KnockoutPage() {
 
   let bracketState: BracketState = 'locked_pending_groups';
   let matches: KnockoutMatchWithTeams[] = [];
-  let existingPicks: Record<string, string> = {};
+  let existingScorePicks: ExistingScorePicks = {};
   let error: string | null = null;
 
   try {
-    ({ bracketState, matches, existingPicks } = await getBracketData(user?.id ?? null));
+    ({ bracketState, matches, existingScorePicks } = await getBracketData(user?.id ?? null));
   } catch (e) {
     error = e instanceof Error ? e.message : 'Erro ao carregar mata-mata';
   }
@@ -136,7 +140,7 @@ export default async function KnockoutPage() {
       ) : (
         <KnockoutClient
           matches={matches}
-          existingPicks={existingPicks}
+          existingScorePicks={existingScorePicks}
           bracketState={bracketState}
           userId={user?.id ?? ''}
         />
