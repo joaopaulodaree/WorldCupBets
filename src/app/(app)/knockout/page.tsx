@@ -22,20 +22,18 @@ async function getBracketData(userId: string | null) {
   const admin = createAdminClient();
 
   // Check if groups are finished and R32 slots populated
-  const [{ count: unfinished }, { count: populatedR32 }] = await Promise.all([
-    admin.from('matches').select('id', { count: 'exact', head: true }).neq('status', 'finished'),
-    admin
-      .from('knockout_matches')
-      .select('id', { count: 'exact', head: true })
-      .eq('round', 5)
-      .not('home_team_id', 'is', null)
-      .not('away_team_id', 'is', null),
-  ]);
+  const { count: populatedR32 } = await admin
+    .from('knockout_matches')
+    .select('id', { count: 'exact', head: true })
+    .eq('round', 5)
+    .not('home_team_id', 'is', null)
+    .not('away_team_id', 'is', null);
 
-  const groupsFinished = (unfinished ?? 1) === 0;
-  const r32Ready = (populatedR32 ?? 0) >= 16;
+  // Show bracket as soon as at least one R32 match is known (Copa 2026 starts R32
+  // while group stage is still running, so we can't wait for groupsFinished).
+  const r32Ready = (populatedR32 ?? 0) >= 1;
 
-  if (!groupsFinished || !r32Ready) {
+  if (!r32Ready) {
     return {
       bracketState: 'locked_pending_groups' as BracketState,
       matches: [] as KnockoutMatchWithTeams[],
@@ -43,17 +41,18 @@ async function getBracketData(userId: string | null) {
     };
   }
 
-  // Check lock: has first R32 match started?
-  const { data: firstR32 } = await admin
+  // Lock picks only after the LAST R32 match has started — gives users time to
+  // predict while some matches are still upcoming even if early ones already played.
+  const { data: lastR32 } = await admin
     .from('knockout_matches')
     .select('kickoff_at')
     .eq('round', 5)
     .not('kickoff_at', 'is', null)
-    .order('kickoff_at', { ascending: true })
+    .order('kickoff_at', { ascending: false })
     .limit(1);
 
-  const firstKickoff = firstR32?.[0]?.kickoff_at ? new Date(firstR32[0].kickoff_at) : null;
-  const bracketLocked = firstKickoff ? firstKickoff <= new Date() : false;
+  const lastKickoff = lastR32?.[0]?.kickoff_at ? new Date(lastR32[0].kickoff_at) : null;
+  const bracketLocked = lastKickoff ? lastKickoff <= new Date() : false;
 
   // Fetch all knockout matches with team info
   const { data: rawMatches } = await admin
