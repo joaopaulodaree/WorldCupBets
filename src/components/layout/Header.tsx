@@ -62,6 +62,7 @@ export function Header() {
           { href: '/matches', label: 'Jogos' },
           { href: '/groups', label: 'Grupos' },
           { href: '/leaderboard', label: 'Ranking' },
+          { href: '/knockout', label: 'Mata-mata' },
         ].map((item) => (
           <Link
             key={item.href}

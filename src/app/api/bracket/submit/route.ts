@@ -51,6 +51,12 @@ export async function POST(request: Request) {
 
   // 4. Validate no draws
   for (const pick of picks) {
+    if (typeof pick.homeGoals !== 'number' || typeof pick.awayGoals !== 'number') {
+      return NextResponse.json(
+        { error: `Pick inválido: gols ausentes (rodada ${pick.round}, slot ${pick.slot})` },
+        { status: 400 }
+      );
+    }
     if (pick.homeGoals === pick.awayGoals) {
       return NextResponse.json(
         { error: `Empate não permitido no mata-mata (rodada ${pick.round}, slot ${pick.slot})` },

@@ -66,7 +66,6 @@ function buildMockAdmin(availableMatchData?: Array<{ round: number; slot: number
       }
       // insert call
       const insertChain = makeAwaitableChain({ error: null });
-      (insertChain.insert as ReturnType<typeof vi.fn>) = vi.fn().mockResolvedValue({ error: null });
       insertChain.insert = vi.fn().mockResolvedValue({ error: null });
       return insertChain;
     }
