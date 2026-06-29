@@ -78,24 +78,13 @@ export async function POST(request: Request) {
     expectedByRound.get(m.round)!.add(m.slot);
   }
 
-  const totalRequired = (availableMatches ?? []).length;
-  if (picks.length !== totalRequired) {
-    return NextResponse.json(
-      { error: `Envie exatamente ${totalRequired} picks` },
-      { status: 400 }
-    );
-  }
+  // Validate slot coverage: every DB-populated slot must have a pick.
+  // Extra picks (for derived/future rounds) are accepted and stored.
+  const picksMap = new Map(picks.map(p => [`${p.round}-${p.slot}`, p]));
 
   for (const [round, slots] of expectedByRound) {
-    const roundPicks = picks.filter(p => p.round === round);
-    if (roundPicks.length !== slots.size) {
-      return NextResponse.json(
-        { error: `Rodada ${round}: esperado ${slots.size} picks, recebido ${roundPicks.length}` },
-        { status: 400 }
-      );
-    }
     for (const slot of slots) {
-      if (!roundPicks.some(p => p.slot === slot)) {
+      if (!picksMap.has(`${round}-${slot}`)) {
         return NextResponse.json(
           { error: `Rodada ${round}: slot ${slot} não preenchido` },
           { status: 400 }

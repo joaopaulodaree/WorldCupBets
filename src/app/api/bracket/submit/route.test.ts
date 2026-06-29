@@ -133,10 +133,11 @@ describe('POST /api/bracket/submit', () => {
     expect(body.error).toMatch(/empate/i);
   });
 
-  test('returns 400 when picks.length does not match available matches', async () => {
+  test('returns 400 when required slots are missing (short picks)', async () => {
     const { POST } = await import('./route');
 
-    const shortPicks = makeValidPicks().slice(0, 10); // only 10 picks
+    // Only 10 picks — many required R32 slots will be missing
+    const shortPicks = makeValidPicks().slice(0, 10);
     const req = new Request('http://localhost/api/bracket/submit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -146,19 +147,17 @@ describe('POST /api/bracket/submit', () => {
     const res = await POST(req);
     expect(res.status).toBe(400);
     const body = await res.json();
-    // Should say "Envie exatamente 31 picks"
-    expect(body.error).toContain('31');
+    // Should mention a missing slot
+    expect(body.error).toMatch(/slot \d+ não preenchido/);
   });
 
-  test('returns 400 when a round has wrong slot count', async () => {
+  test('returns 400 when a required slot is missing (replaced by extra slot in same round)', async () => {
     const { POST } = await import('./route');
 
-    // Build picks with round 5 having only 15 picks and round 6 having 9 (to keep total at 31)
+    // Remove R5 slot 15 (required) and add an extra R6 slot — total stays 31 but slot 15 is missing
     const picks = makeValidPicks();
-    // Remove one R5 pick and add one to R6 to shift counts but keep total=31
     const badPicks = picks.filter(p => !(p.round === 5 && p.slot === 15));
     badPicks.push({ round: 6, slot: 8, teamId: 'extra-r6', homeGoals: 2, awayGoals: 1 });
-    // Now R5 has 15 (wrong), R6 has 9 (wrong), total=31
 
     const req = new Request('http://localhost/api/bracket/submit', {
       method: 'POST',
@@ -169,8 +168,8 @@ describe('POST /api/bracket/submit', () => {
     const res = await POST(req);
     expect(res.status).toBe(400);
     const body = await res.json();
-    // Should mention the wrong round
-    expect(body.error).toMatch(/Rodada/);
+    // Should mention the missing slot in round 5
+    expect(body.error).toMatch(/Rodada 5.*slot 15/);
   });
 
   test('returns 400 when a slot is missing in a round (duplicate slot replacing missing one)', async () => {
