@@ -41,18 +41,9 @@ async function getBracketData(userId: string | null) {
     };
   }
 
-  // Lock picks only after the LAST R32 match has started — gives users time to
-  // predict while some matches are still upcoming even if early ones already played.
-  const { data: lastR32 } = await admin
-    .from('knockout_matches')
-    .select('kickoff_at')
-    .eq('round', 5)
-    .not('kickoff_at', 'is', null)
-    .order('kickoff_at', { ascending: false })
-    .limit(1);
-
-  const lastKickoff = lastR32?.[0]?.kickoff_at ? new Date(lastR32[0].kickoff_at) : null;
-  const bracketLocked = lastKickoff ? lastKickoff <= new Date() : false;
+  // No arguments to be passed here - individual match locking is handled per-match
+  // based on status (live/finished). The bracket window stays open as long as any
+  // match with known teams hasn't started yet.
 
   // Fetch all knockout matches with team info
   const { data: rawMatches } = await admin
@@ -93,17 +84,23 @@ async function getBracketData(userId: string | null) {
     }
   }
 
-  // Determine bracket state
-  const hasSubmitted = userId ? Object.keys(existingScorePicks).length > 0 : false;
-  const allFinished = matches.length > 0 && matches.every(m => m.status === 'finished');
+  // Bracket is open as long as there's at least one unstarted match with both teams known
+  const hasPickableMatch = matches.some(
+    (m) =>
+      m.homeTeam &&
+      m.awayTeam &&
+      m.status !== 'live' &&
+      m.status !== 'finished',
+  );
+  const allFinished = matches.length > 0 && matches.every((m) => m.status === 'finished');
 
   let bracketState: BracketState;
-  if (!bracketLocked) {
+  if (hasPickableMatch) {
     bracketState = 'available_for_picks';
   } else if (allFinished) {
     bracketState = 'completed';
   } else {
-    bracketState = hasSubmitted ? 'results_revealing' : 'picks_locked';
+    bracketState = 'results_revealing';
   }
 
   return { bracketState, matches, existingScorePicks };

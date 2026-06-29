@@ -24,19 +24,7 @@ export async function POST(request: Request) {
 
   const admin = createAdminClient();
 
-  // 2. Check already submitted
-  const { data: existing } = await admin
-    .from('bracket_picks')
-    .select('id')
-    .eq('user_id', user.id)
-    .eq('is_submitted', true)
-    .limit(1);
-
-  if (existing && existing.length > 0) {
-    return NextResponse.json({ alreadySubmitted: true }, { status: 409 });
-  }
-
-  // 3. Parse body
+  // 2. Parse body
   let body: { picks?: PickInput[] };
   try {
     body = await request.json();
@@ -49,72 +37,42 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Picks inválidos' }, { status: 400 });
   }
 
-  // 4. Validate no draws
+  // 3. Validate: no draws, valid goal values
   for (const pick of picks) {
     if (typeof pick.homeGoals !== 'number' || typeof pick.awayGoals !== 'number') {
       return NextResponse.json(
         { error: `Pick inválido: gols ausentes (rodada ${pick.round}, slot ${pick.slot})` },
-        { status: 400 }
+        { status: 400 },
       );
     }
     if (pick.homeGoals === pick.awayGoals) {
       return NextResponse.json(
         { error: `Empate não permitido no mata-mata (rodada ${pick.round}, slot ${pick.slot})` },
-        { status: 400 }
+        { status: 400 },
       );
     }
   }
 
-  // 5. Validate slot coverage against what's actually populated in the DB
-  const { data: availableMatches } = await admin
+  // 4. Reject picks for matches that have already started or finished
+  const { data: startedMatches } = await admin
     .from('knockout_matches')
     .select('round, slot')
-    .not('home_team_id', 'is', null)
-    .not('away_team_id', 'is', null);
+    .in('status', ['live', 'finished']);
 
-  const expectedByRound = new Map<number, Set<number>>();
-  for (const m of availableMatches ?? []) {
-    if (!expectedByRound.has(m.round)) expectedByRound.set(m.round, new Set());
-    expectedByRound.get(m.round)!.add(m.slot);
-  }
+  const startedSet = new Set((startedMatches ?? []).map((m) => `${m.round}-${m.slot}`));
 
-  // Validate slot coverage: every DB-populated slot must have a pick.
-  // Extra picks (for derived/future rounds) are accepted and stored.
-  const picksMap = new Map(picks.map(p => [`${p.round}-${p.slot}`, p]));
-
-  for (const [round, slots] of expectedByRound) {
-    for (const slot of slots) {
-      if (!picksMap.has(`${round}-${slot}`)) {
-        return NextResponse.json(
-          { error: `Rodada ${round}: slot ${slot} não preenchido` },
-          { status: 400 }
-        );
-      }
-    }
-  }
-
-  // 6. Check bracket not locked (first R32 match hasn't started)
-  const { data: firstR32 } = await admin
-    .from('knockout_matches')
-    .select('kickoff_at')
-    .eq('round', 5)
-    .not('kickoff_at', 'is', null)
-    .order('kickoff_at', { ascending: true })
-    .limit(1);
-
-  if (firstR32?.[0]?.kickoff_at) {
-    const firstKickoff = new Date(firstR32[0].kickoff_at);
-    if (firstKickoff <= new Date()) {
+  for (const pick of picks) {
+    if (startedSet.has(`${pick.round}-${pick.slot}`)) {
       return NextResponse.json(
-        { error: 'Bracket travado — primeiro jogo já começou' },
-        { status: 409 }
+        { error: `Jogo já começou — palpite não permitido (rodada ${pick.round}, slot ${pick.slot})` },
+        { status: 409 },
       );
     }
   }
 
-  // 7. Insert picks with scores
+  // 5. Upsert picks — allows re-saving until a match starts
   const submittedAt = new Date().toISOString();
-  const rows = picks.map(p => ({
+  const rows = picks.map((p) => ({
     user_id: user.id,
     round: p.round,
     slot: p.slot,
@@ -125,13 +83,12 @@ export async function POST(request: Request) {
     submitted_at: submittedAt,
   }));
 
-  const { error: insertError } = await admin.from('bracket_picks').insert(rows);
+  const { error: upsertError } = await admin
+    .from('bracket_picks')
+    .upsert(rows, { onConflict: 'user_id,round,slot' });
 
-  if (insertError) {
-    if (insertError.code === '23505') {
-      return NextResponse.json({ alreadySubmitted: true }, { status: 409 });
-    }
-    return NextResponse.json({ error: insertError.message }, { status: 500 });
+  if (upsertError) {
+    return NextResponse.json({ error: upsertError.message }, { status: 500 });
   }
 
   return NextResponse.json({ ok: true });

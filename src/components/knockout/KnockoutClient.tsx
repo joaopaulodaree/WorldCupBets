@@ -1,16 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { BracketScoreCard } from './BracketScoreCard';
 import { RoundTab } from './RoundTab';
-import {
-  computeAllMatches,
-  toGoals,
-  ROUNDS,
-  ROUND_LABELS,
-  type ScorePicks,
-  type TeamInfo,
-} from '@/lib/knockout/bracketLogic';
+import { toGoals, ROUNDS, ROUND_SLOTS, ROUND_LABELS, type TeamInfo } from '@/lib/knockout/bracketLogic';
 
 export type BracketState =
   | 'locked_pending_groups'
@@ -37,24 +30,22 @@ interface Props {
   userId: string;
 }
 
-function draftKey(userId: string) {
-  return `mata-mata-draft-${userId}`;
-}
+type PickState = Record<string, { homeGoals: string; awayGoals: string }>;
 
-function buildR32Map(matches: KnockoutMatchWithTeams[]) {
-  const map = new Map<string, { home: TeamInfo | null; away: TeamInfo | null }>();
-  for (const m of matches) {
-    if (m.round === 5) {
-      map.set(`5-${m.slot}`, { home: m.homeTeam, away: m.awayTeam });
-    }
-  }
-  return map;
-}
-
-export function KnockoutClient({ matches, existingScorePicks, bracketState, userId }: Props) {
+export function KnockoutClient({ matches, existingScorePicks, bracketState }: Props) {
   const locked = bracketState !== 'available_for_picks';
 
-  const r32TeamsMap = buildR32Map(matches);
+  // Index DB matches by "round-slot" — API populates correct Copa 2026 bracket structure
+  const matchMap = new Map<string, KnockoutMatchWithTeams>(
+    matches.map((m) => [`${m.round}-${m.slot}`, m]),
+  );
+
+  // Individually lock matches that have already started or finished
+  const startedMatchKeys = new Set(
+    matches
+      .filter((m) => m.status === 'live' || m.status === 'finished')
+      .map((m) => `${m.round}-${m.slot}`),
+  );
 
   const actualWinnerMap = new Map<string, string>(
     matches
@@ -62,50 +53,25 @@ export function KnockoutClient({ matches, existingScorePicks, bracketState, user
       .map((m) => [`${m.round}-${m.slot}`, m.winnerTeamId!]),
   );
 
-  // Matches that have started or finished are locked individually regardless of bracket state
-  const startedMatchKeys = new Set(
-    matches
-      .filter((m) => m.status === 'live' || m.status === 'finished')
-      .map((m) => `${m.round}-${m.slot}`),
-  );
-
   const [activeRound, setActiveRound] = useState(5);
-  const [scorePicks, setScorePicks] = useState<ScorePicks>(() => {
-    // Initialize from existing submitted picks
-    const base: ScorePicks = {};
+  const [scorePicks, setScorePicks] = useState<PickState>(() => {
+    const base: PickState = {};
     for (const [key, pick] of Object.entries(existingScorePicks)) {
       if (pick.homeGoals !== null && pick.awayGoals !== null) {
         base[key] = { homeGoals: String(pick.homeGoals), awayGoals: String(pick.awayGoals) };
-      }
-    }
-    // Merge localStorage draft if bracket is open
-    if (typeof window !== 'undefined' && bracketState === 'available_for_picks') {
-      try {
-        const draft = JSON.parse(localStorage.getItem(draftKey(userId)) ?? '{}') as ScorePicks;
-        Object.assign(base, draft);
-      } catch {
-        // ignore
       }
     }
     return base;
   });
 
   const [submitting, setSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState(Object.keys(existingScorePicks).length > 0);
   const [submitError, setSubmitError] = useState<string | null>(null);
-
-  // Persist draft
-  useEffect(() => {
-    if (bracketState !== 'available_for_picks') return;
-    try {
-      localStorage.setItem(draftKey(userId), JSON.stringify(scorePicks));
-    } catch {
-      // ignore
-    }
-  }, [scorePicks, userId, bracketState]);
+  const [saveSuccess, setSaveSuccess] = useState(false);
 
   const handleGoalsChange = useCallback(
     (round: number, slot: number, side: 'home' | 'away', value: string) => {
+      setSaveSuccess(false);
+      setSubmitError(null);
       const key = `${round}-${slot}`;
       setScorePicks((prev) => ({
         ...prev,
@@ -118,47 +84,59 @@ export function KnockoutClient({ matches, existingScorePicks, bracketState, user
     [],
   );
 
-  // Derived
-  const allMatches = computeAllMatches(scorePicks, r32TeamsMap);
-  const matchesWithTeams = allMatches.filter((m) => m.home && m.away);
+  // Get all slots for a round — DB teams if known, null if not yet assigned
+  const getSlots = (round: number) =>
+    Array.from({ length: ROUND_SLOTS[round] }, (_, slot) => {
+      const m = matchMap.get(`${round}-${slot}`);
+      return { slot, homeTeam: m?.homeTeam ?? null, awayTeam: m?.awayTeam ?? null };
+    });
 
-  const validPickCount = matchesWithTeams.filter(({ round, slot }) => {
+  // Matches that can be picked: both teams known + not yet started
+  const pickableForRound = (round: number) =>
+    getSlots(round).filter(
+      ({ slot, homeTeam, awayTeam }) =>
+        homeTeam && awayTeam && !startedMatchKeys.has(`${round}-${slot}`),
+    );
+
+  const roundPickCount = (round: number) =>
+    pickableForRound(round).filter(({ slot }) => {
+      const pick = scorePicks[`${round}-${slot}`];
+      const h = toGoals(pick?.homeGoals);
+      const a = toGoals(pick?.awayGoals);
+      return h !== null && a !== null && h !== a;
+    }).length;
+
+  const roundTotal = (round: number) => pickableForRound(round).length;
+
+  const allPickable = ROUNDS.flatMap((r) =>
+    pickableForRound(r).map(({ slot, homeTeam, awayTeam }) => ({
+      round: r,
+      slot,
+      homeTeam,
+      awayTeam,
+    })),
+  );
+
+  const validPickCount = allPickable.filter(({ round, slot }) => {
     const pick = scorePicks[`${round}-${slot}`];
     const h = toGoals(pick?.homeGoals);
     const a = toGoals(pick?.awayGoals);
     return h !== null && a !== null && h !== a;
   }).length;
 
-  const allPicksDone = matchesWithTeams.length > 0 && validPickCount === matchesWithTeams.length;
-
-  const roundPickCount = (round: number) =>
-    allMatches
-      .filter((m) => m.round === round && m.home && m.away)
-      .filter(({ slot }) => {
-        const pick = scorePicks[`${round}-${slot}`];
-        const h = toGoals(pick?.homeGoals);
-        const a = toGoals(pick?.awayGoals);
-        return h !== null && a !== null && h !== a;
-      }).length;
-
-  const roundTotal = (round: number) =>
-    allMatches.filter((m) => m.round === round && m.home && m.away).length;
-
   async function handleSubmit() {
-    if (!allPicksDone || submitting) return;
+    if (submitting || validPickCount === 0) return;
     setSubmitting(true);
     setSubmitError(null);
 
-    const pickList = matchesWithTeams
-      .map(({ round, slot, home, away }) => {
-        const pick = scorePicks[`${round}-${slot}`];
-        const h = toGoals(pick?.homeGoals);
-        const a = toGoals(pick?.awayGoals);
-        if (h === null || a === null || h === a) return null;
-        const winner = h > a ? home! : away!;
-        return { round, slot, teamId: winner.id, homeGoals: h, awayGoals: a };
-      })
-      .filter(Boolean);
+    const pickList = allPickable.flatMap(({ round, slot, homeTeam, awayTeam }) => {
+      const pick = scorePicks[`${round}-${slot}`];
+      const h = toGoals(pick?.homeGoals);
+      const a = toGoals(pick?.awayGoals);
+      if (h === null || a === null || h === a) return [];
+      const winner = h > a ? homeTeam! : awayTeam!;
+      return [{ round, slot, teamId: winner.id, homeGoals: h, awayGoals: a }];
+    });
 
     try {
       const res = await fetch('/api/bracket/submit', {
@@ -167,20 +145,14 @@ export function KnockoutClient({ matches, existingScorePicks, bracketState, user
         body: JSON.stringify({ picks: pickList }),
       });
 
-      if (res.status === 409) {
-        setSubmitted(true);
-        try { localStorage.removeItem(draftKey(userId)); } catch { /* ignore */ }
-        return;
-      }
-
       if (!res.ok) {
-        const body = await res.json() as { error?: string };
-        setSubmitError(body.error ?? 'Erro ao enviar bracket');
+        const body = (await res.json()) as { error?: string };
+        setSubmitError(body.error ?? 'Erro ao salvar palpites');
         return;
       }
 
-      setSubmitted(true);
-      try { localStorage.removeItem(draftKey(userId)); } catch { /* ignore */ }
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
     } catch {
       setSubmitError('Erro de rede. Tente novamente.');
     } finally {
@@ -206,7 +178,7 @@ export function KnockoutClient({ matches, existingScorePicks, bracketState, user
     );
   }
 
-  const activeMatches = allMatches.filter((m) => m.round === activeRound);
+  const activeSlots = getSlots(activeRound);
 
   return (
     <div className="space-y-4">
@@ -224,63 +196,57 @@ export function KnockoutClient({ matches, existingScorePicks, bracketState, user
         ))}
       </div>
 
-      {/* Match cards for active round */}
+      {/* Match cards — teams from DB (API owns correct Copa 2026 bracket structure) */}
       <div className="space-y-3">
-        {activeMatches.map(({ round, slot, home, away }) => {
-          const key = `${round}-${slot}`;
+        {activeSlots.map(({ slot, homeTeam, awayTeam }) => {
+          const key = `${activeRound}-${slot}`;
           const pick = scorePicks[key];
+          const isStarted = startedMatchKeys.has(key);
           return (
             <BracketScoreCard
               key={key}
-              homeTeam={home}
-              awayTeam={away}
+              homeTeam={homeTeam}
+              awayTeam={awayTeam}
               homeGoals={pick?.homeGoals ?? ''}
               awayGoals={pick?.awayGoals ?? ''}
-              onHomeChange={(v) => handleGoalsChange(round, slot, 'home', v)}
-              onAwayChange={(v) => handleGoalsChange(round, slot, 'away', v)}
-              locked={locked || submitted || startedMatchKeys.has(key)}
+              onHomeChange={(v) => handleGoalsChange(activeRound, slot, 'home', v)}
+              onAwayChange={(v) => handleGoalsChange(activeRound, slot, 'away', v)}
+              locked={locked || isStarted}
               actualWinnerId={actualWinnerMap.get(key) ?? null}
             />
           );
         })}
       </div>
 
-      {/* Submit */}
-      {bracketState === 'available_for_picks' && !submitted && (
+      {/* Save button — shown whenever bracket window is open, not just before first submit */}
+      {bracketState === 'available_for_picks' && (
         <div className="sticky bottom-20 pt-2">
           {submitError && (
-            <p className="text-center text-sm mb-2" style={{ color: '#EF4444' }}>{submitError}</p>
+            <p className="text-center text-sm mb-2" style={{ color: '#EF4444' }}>
+              {submitError}
+            </p>
+          )}
+          {saveSuccess && (
+            <p className="text-center text-sm mb-2" style={{ color: 'var(--brand-green)' }}>
+              ✓ Palpites salvos!
+            </p>
           )}
           <button
             onClick={handleSubmit}
-            disabled={!allPicksDone || submitting}
+            disabled={submitting || validPickCount === 0}
             className="w-full py-4 rounded-2xl font-bold text-base transition-all"
             style={{
-              background: allPicksDone ? 'var(--brand-green)' : 'var(--bg-secondary)',
-              color: allPicksDone ? '#000' : 'var(--text-tertiary)',
-              cursor: allPicksDone ? 'pointer' : 'default',
+              background: validPickCount > 0 ? 'var(--brand-green)' : 'var(--bg-secondary)',
+              color: validPickCount > 0 ? '#000' : 'var(--text-tertiary)',
+              cursor: validPickCount > 0 ? 'pointer' : 'default',
             }}
           >
             {submitting
-              ? 'Enviando…'
-              : allPicksDone
-              ? `Confirmar bracket (${validPickCount}/${matchesWithTeams.length})`
-              : `Preencha todos os palpites (${validPickCount}/${matchesWithTeams.length})`}
+              ? 'Salvando…'
+              : validPickCount > 0
+                ? `Salvar palpites (${validPickCount}/${allPickable.length})`
+                : 'Preencha os palpites'}
           </button>
-        </div>
-      )}
-
-      {submitted && (
-        <div
-          className="rounded-2xl p-4 text-center"
-          style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.3)' }}
-        >
-          <p className="font-semibold" style={{ color: 'var(--brand-green)' }}>
-            ✓ Bracket confirmado!
-          </p>
-          <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
-            Acompanhe os resultados aqui conforme os jogos acontecem.
-          </p>
         </div>
       )}
     </div>
